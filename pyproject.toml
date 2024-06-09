@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "netcup-dyndns-and-trusted-proxies-updater"
+version = "1.0.0"
+description = "Uses the Netcup API to change the IPv4 and IPv6 IP for a given domain. In addition, the new IPv6 address is transferred to Nextcloud's Trusted Proxies configuration."
+authors = ["Massoud Ahmed"]
+license = "GPL-3.0 license"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+requests = "^2.32.3"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.4.8"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
