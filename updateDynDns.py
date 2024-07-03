@@ -79,9 +79,9 @@ print("IPv4 address: " + IPv4)
 try:
     IPv6 = requests.get(url=IPV6_API).json()["ip"]
     print("IPv6 address: " + IPv6)
-except:
+except requests.exceptions.RequestException as e:
     IPv6 = None
-    print("Warning: No IPv6 address found. IPv6 cache will not be written.")
+    print(f"Warning: No IPv6 address found. IPv6 cache will not be written: {e}")
     
 # Check if IPs have changed
 if IPv4 == cached_ipv4 and IPv6 == cached_ipv6:
