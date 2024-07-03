@@ -69,6 +69,7 @@ def validate_settings(settings):
 
 with open(conf) as fp:
     settings = json.load(fp)
+    validate_settings(settings)
 
 
 # Get public IPv4 address
