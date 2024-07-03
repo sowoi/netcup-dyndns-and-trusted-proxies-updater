@@ -80,6 +80,7 @@ try:
     IPv6 = requests.get(url=IPV6_API).json()["ip"]
     print("IPv6 address: " + IPv6)
 except:
+    IPv6 = None
     print("Warning: No IPv6 address found. IPv6 cache will not be written.")
     
 # Check if IPs have changed
