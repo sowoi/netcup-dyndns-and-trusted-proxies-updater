@@ -2,7 +2,6 @@ import os
 
 import pytest
 import requests
-from unittest import mock
 from unittest.mock import mock_open
 
 
