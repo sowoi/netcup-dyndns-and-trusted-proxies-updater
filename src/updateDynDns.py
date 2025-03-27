@@ -53,6 +53,7 @@ def write_cached_ips(ipv4, ipv6=None):
     with open(".temp/ipv6_cache.txt", "w") as f:
         f.write(ipv6)
 
+
 # Validates values in settings.json
 def validate_settings(settings):
     required_keys = [
@@ -71,14 +72,13 @@ def validate_settings(settings):
                 f"The key {key} cannot be empty. Please fill in the missing value in the .settings.json file."
             )
 
+
 def main():
     # Create the .settings.json file if it doesn't exist
     create_settings_file_if_not_exists(settings_file_path, default_settings)
 
-
     # Read cached IPs
     cached_ipv4, cached_ipv6 = read_cached_ips()
-
 
     with open(conf) as fp:
         settings = json.load(fp)
@@ -137,7 +137,6 @@ def main():
         check=True,
     )
     subprocess.run(["systemctl", "restart", "nginx"], check=True)
-
 
     domains_list = [domain.strip() for domain in NETCUP_DOMAIN.split(",")]
 

@@ -2,6 +2,7 @@ import os
 import pytest
 from src.updateDynDns import create_settings_file_if_not_exists
 
+
 @pytest.fixture
 def create_settings_file():
     """Fixture for settings file"""
@@ -12,11 +13,13 @@ def create_settings_file():
         "CUSTOMER_ID": "",
         "NETCUP_DOMAIN": "",
         "NEXTCLOUD_PATH": "",
-        "TRUSTED_PROXIES_POS": ""
+        "TRUSTED_PROXIES_POS": "",
     }
 
     # run process with mocking data"
-    settings_file = create_settings_file_if_not_exists(mock_settings_file_path, mock_default_setting)
+    settings_file = create_settings_file_if_not_exists(
+        mock_settings_file_path, mock_default_setting
+    )
 
     # wait until process is finished
     yield settings_file
