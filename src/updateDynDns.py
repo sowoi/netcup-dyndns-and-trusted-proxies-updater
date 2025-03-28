@@ -73,6 +73,24 @@ def validate_settings(settings):
             )
 
 
+def nginx_trusted_proxies_configuration(nextcloud_path, trusted_proxies_pos, ipv6):
+    subprocess.run(
+        [
+            "sudo",
+            "-u",
+            "www-data",
+            "php",
+            f"{nextcloud_path}/occ",
+            "config:system:set",
+            "trusted_proxies",
+            trusted_proxies_pos,
+            f"--value={ipv6}",
+        ],
+        check=True,
+    )
+    subprocess.run(["systemctl", "restart", "nginx"], check=True)
+
+
 def main():
     # Create the .settings.json file if it doesn't exist
     create_settings_file_if_not_exists(settings_file_path, default_settings)
@@ -122,21 +140,9 @@ def main():
     except json.JSONDecodeError:
         print("Error: .settings.json is not a valid JSON document.")
 
-    subprocess.run(
-        [
-            "sudo",
-            "-u",
-            "www-data",
-            "php",
-            f"{NEXTCLOUD_PATH}/occ",
-            "config:system:set",
-            "trusted_proxies",
-            TRUSTED_PROXIES_POS,
-            f"--value={IPv6}",
-        ],
-        check=True,
-    )
-    subprocess.run(["systemctl", "restart", "nginx"], check=True)
+
+    nginx_trusted_proxies_configuration(NEXTCLOUD_PATH, TRUSTED_PROXIES_POS, IPv6)
+
 
     domains_list = [domain.strip() for domain in NETCUP_DOMAIN.split(",")]
 
