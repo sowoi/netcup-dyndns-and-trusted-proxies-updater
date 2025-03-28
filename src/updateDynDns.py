@@ -1,10 +1,11 @@
 import sys
 import requests
 import json
-import os
 import subprocess
+from pathlib import Path
 
 conf = ".settings.json"
+cache_dir = ".temp"
 # URLs to APIs
 NETCUP_API = "https://ccp.netcup.net/run/webservice/servers/endpoint.php?JSON"
 IPV4_API = "https://api.ipify.org?format=json"
@@ -24,7 +25,8 @@ default_settings = {
 
 
 def create_settings_file_if_not_exists(file_path, default_content):
-    if not os.path.exists(file_path):
+    settings_file_path = Path(file_path)
+    if not settings_file_path.exists():
         with open(file_path, "w") as f:
             json.dump(default_content, f, indent=4)
         print(f"Settings file created at {file_path}")
@@ -33,25 +35,23 @@ def create_settings_file_if_not_exists(file_path, default_content):
 
 
 # Function to read IP addresses from cache
-def read_cached_ips():
-    ipv4_cache, ipv6_cache = None, None
+def read_cached_ips(ipv4_cache=None, ipv6_cache=None, cache_dir=cache_dir):
+    cache_path = Path(cache_dir)
     try:
-        with open(".temp/ipv4_cache.txt", "r") as f:
-            ipv4_cache = f.read().strip()
-        with open(".temp/ipv6_cache.txt", "r") as f:
-            ipv6_cache = f.read().strip()
+        ipv4_cache = (cache_path / "ipv4_cache.txt").read_text()
+        ipv6_cache = (cache_path / "ipv6_cache.txt").read_text()
     except FileNotFoundError:
         pass
     return ipv4_cache, ipv6_cache
 
 
 # Function to write IP addresses to cache
-def write_cached_ips(ipv4, ipv6=None):
-    os.makedirs(".temp", exist_ok=True)
-    with open(".temp/ipv4_cache.txt", "w") as f:
-        f.write(ipv4)
-    with open(".temp/ipv6_cache.txt", "w") as f:
-        f.write(ipv6)
+def write_cached_ips(ipv4, ipv6=None, cache_dir=cache_dir):
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+
+    (cache_path / "ipv4_cache.txt").write_text(ipv4)
+    (cache_path / "ipv6_cache.txt").write_text(ipv6)
 
 
 # Validates values in settings.json
