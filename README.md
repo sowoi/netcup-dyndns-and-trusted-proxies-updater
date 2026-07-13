@@ -55,6 +55,31 @@ TRUSTED_PROXIES_POS: The position in the TrustedProxies configuration where the 
 To run the script periodically, set up a cron job or a systemd timer. 
 This will ensure your IP address is regularly checked and updated.
 
+While updating DNS records, a progress bar is shown. Its total is derived from the
+number of subdomains listed in NETCUP_DOMAIN (each subdomain accounts for one A and
+one AAAA record), and it advances by one step for every record that is successfully
+updated, reaching 100% once all A and AAAA records for every configured subdomain
+have been updated:
+
+```
+Updating DNS records: 100%|██████████| 4/4 records
+```
+
+Regular progress is logged to stdout with timestamps and log levels (INFO/WARNING).
+Errors are logged in red (ERROR) so failures stand out immediately.
+
+When multiple domains or subdomains are configured, the script prints a summary at
+the end grouped by domain instead of a flat sequential list, e.g.:
+
+```
+example.com
+  - sub          A     -> 1.2.3.4
+  - sub          AAAA  -> ::1
+  - www          A     -> 1.2.3.4
+example.net
+  - app          A     -> 1.2.3.4
+```
+
 ## Configuration
 
 Upon the first execution, the script creates a settings.json file and a temp folder.
@@ -74,6 +99,11 @@ uv run --dev ruff check
 To run tests:
 ```
 uv run --dev pytest
+```
+
+To run tests with a coverage report:
+```
+uv run --dev pytest --cov=src --cov-report=term-missing
 ```
 
 ## License
