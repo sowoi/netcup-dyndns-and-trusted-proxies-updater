@@ -39,7 +39,10 @@ The first run will create a settings.json file and a temp folder in your project
     "CUSTOMER_ID": "",
     "NETCUP_DOMAIN": "",
     "NEXTCLOUD_PATH": "",
-    "TRUSTED_PROXIES_POS": ""
+    "TRUSTED_PROXIES_POS": "",
+    "PARALLEL_PROCESSES": 1,
+    "IP_MODE": "both",
+    "DISABLE_NEXTCLOUD_NGINX": false
 }
 ```
 
@@ -47,8 +50,11 @@ API_PASSWORD: Your Netcup API password.
 API_KEY: Your Netcup API key.  
 CUSTOMER_ID: Your Netcup customer ID.  
 NETCUP_DOMAIN: The domain name(s) you want to update, separated by commas (e.g., example.com, example.net).  
-NEXTCLOUD_PATH: The file path to your Nextcloud instance. 
-TRUSTED_PROXIES_POS: The position in the TrustedProxies configuration where the new IP address should be added (e.g., the first, second, etc.).  
+NEXTCLOUD_PATH: The file path to your Nextcloud instance (required unless DISABLE_NEXTCLOUD_NGINX is true).
+TRUSTED_PROXIES_POS: The position in the TrustedProxies configuration where the new IP address should be added (e.g., the first, second, etc.; required unless DISABLE_NEXTCLOUD_NGINX is true).
+PARALLEL_PROCESSES: Number of parallel threads for DNS updates (Default: 1 for sequential execution. Values > 1 enable the ThreadPoolExecutor).
+IP_MODE: Determines which IP types to update. Options are "both" (default), "ipv4", or "ipv6".
+DISABLE_NEXTCLOUD_NGINX: Set to true to disable all Nextcloud OCC and Nginx reload tasks. Useful if you only want to use the script as a pure DynDNS client (Default: false).
 
 ## Usage
 
