@@ -1,5 +1,3 @@
-import pytest
-
 from src.updateDynDns import (
     apply_file_secret_overrides,
     apply_secret_overrides,

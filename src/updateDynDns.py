@@ -2,7 +2,6 @@ import argparse
 import logging
 import os
 import sys
-import threading
 import requests
 import json
 import subprocess
@@ -702,9 +701,6 @@ def main(argv=None):
             settings = apply_cli_overrides(settings, args)
             try:
                 validate_settings(settings)
-                API_PASSWORD = settings["API_PASSWORD"]
-                API_KEY = settings["API_KEY"]
-                CUSTOMER_ID = settings["CUSTOMER_ID"]
                 NETCUP_DOMAIN = settings["NETCUP_DOMAIN"]
                 DISABLE_NEXTCLOUD_NGINX = settings.get("DISABLE_NEXTCLOUD_NGINX", False)
 
