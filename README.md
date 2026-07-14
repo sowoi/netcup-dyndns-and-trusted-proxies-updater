@@ -3,6 +3,7 @@
 * [netcup-dyndns-and-trusted-proxies-updater](#netcup-dyndns-and-trusted-proxies-updater)
   * [Prerequisites](#prerequisites)
   * [Installation](#installation)
+  * [Command-Line Arguments](#command-line-arguments)
   * [Docker Installation (alternative)](#docker-installation-alternative)
   * [Providing Secrets at Runtime](#providing-secrets-at-runtime)
   * [Usage](#usage)
@@ -57,6 +58,52 @@ TRUSTED_PROXIES_POS: The position in the TrustedProxies configuration where the 
 PARALLEL_PROCESSES: Number of parallel threads for DNS updates (Default: 1 for sequential execution. Values > 1 enable the ThreadPoolExecutor).
 IP_MODE: Determines which IP types to update. Options are "both" (default), "ipv4", or "ipv6".
 DISABLE_NEXTCLOUD_NGINX: Set to true to disable all Nextcloud OCC and Nginx reload tasks. Useful if you only want to use the script as a pure DynDNS client (Default: false).
+
+## Command-Line Arguments
+
+Every setting can also be provided as a command-line argument. Command-line arguments
+always take precedence over `.settings.json` (and any secret provider overrides, see
+[Providing Secrets at Runtime](#providing-secrets-at-runtime)), which is useful for
+one-off overrides or wiring the script into other tooling without editing the settings
+file. Run with `--help` to see all available options:
+
+```
+uv run src/updateDynDns.py --help
+```
+
+```
+options:
+  -h, --help            show this help message and exit
+  --api-password API_PASSWORD
+                        Netcup API password. Overrides API_PASSWORD.
+  --api-key API_KEY     Netcup API key. Overrides API_KEY.
+  --customer-id CUSTOMER_ID
+                        N
+  --netcup-domain NETCUP_DOMAIN
+                        Comma-separated domain(s) to update, e.g.
+                        'example.com,example.net'. Overrides NETCUP_DOMAIN.
+  --nextcloud-path NEXTCLOUD_PATH
+                        Path to the Nextcloud installation. Overrides
+                        NEXTCLOUD_PATH.
+  --trusted-proxies-pos TRUSTED_PROXIES_POS
+                        Position in the trusted_proxies configuration to
+                        update. Overrides TRUSTED_PROXIES_POS.
+  --parallel-processes PARALLEL_PROCESSES
+                        Number of parallel DNS-update workers. Overrides
+                        PARALLEL_PROCESSES.
+  --ip-mode {both,ipv4,ipv6}
+                        Which IP types to update: 'both' (default), 'ipv4', or
+                        'ipv6'. Overrides IP_MODE.
+  --disable-nextcloud-nginx, --no-disable-nextcloud-nginx
+                        Disable the Nextcloud OCC / Nginx reload tasks (use
+                        --no-disable-nextcloud-nginx to force-enable them).
+                        Overrides DISABLE_NEXTCLOUD_NGINX.
+```
+
+Example, overriding just the domain for a single run without touching `.settings.json`:
+```
+uv run src/updateDynDns.py --netcup-domain example.com,example.net
+```
 
 ## Docker Installation (alternative)
 
@@ -129,7 +176,9 @@ response shape (`{"data": {"data": {...}}}`). Only keys already recognized by
 
 If both mechanisms are configured, secret-file overrides take precedence over OpenBAO
 values, since they are applied last. Neither mechanism is required — you can continue to
-configure everything directly in `.settings.json`.
+configure everything directly in `.settings.json`. Command-line arguments (see
+[Command-Line Arguments](#command-line-arguments)) are applied after both, and therefore
+always take precedence over secret provider values as well.
 
 ## Usage
 
