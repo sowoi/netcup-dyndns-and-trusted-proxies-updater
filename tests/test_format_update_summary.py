@@ -2,7 +2,7 @@ from src.updateDynDns import format_update_summary
 
 
 def test_format_update_summary_no_records():
-    assert format_update_summary([]) == "No DNS records were updated."
+    assert format_update_summary([]) == "No DNS records were processed."
 
 
 def test_format_update_summary_single_record():

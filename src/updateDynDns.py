@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 import threading
 import requests
@@ -83,8 +84,8 @@ def create_settings_file_if_not_exists(file_path, default_content):
 def read_cached_ips(ipv4_cache=None, ipv6_cache=None, cache_dir=cache_dir):
     cache_path = Path(cache_dir)
     try:
-        ipv4_cache = (cache_path / "ipv4_cache.txt").read_text()
-        ipv6_cache = (cache_path / "ipv6_cache.txt").read_text()
+        ipv4_cache = (cache_path / "ipv4_cache.txt").read_text() or None
+        ipv6_cache = (cache_path / "ipv6_cache.txt").read_text() or None
     except FileNotFoundError:
         pass
     return ipv4_cache, ipv6_cache
@@ -95,8 +96,10 @@ def write_cached_ips(ipv4, ipv6=None, cache_dir=cache_dir):
     cache_path = Path(cache_dir)
     cache_path.mkdir(parents=True, exist_ok=True)
 
-    (cache_path / "ipv4_cache.txt").write_text(ipv4)
-    (cache_path / "ipv6_cache.txt").write_text(ipv6)
+    # Cache files always store a string; unavailable addresses (e.g. no IPv6
+    # connectivity) are written as an empty string and read back as None.
+    (cache_path / "ipv4_cache.txt").write_text(ipv4 or "")
+    (cache_path / "ipv6_cache.txt").write_text(ipv6 or "")
 
 
 # Validates values in settings.json
@@ -117,6 +120,100 @@ def validate_settings(settings):
             raise ValueError(
                 f"The key {key} cannot be empty. Please fill in the missing value in the .settings.json file."
             )
+
+
+SECRET_FILE_ENV_SUFFIX = "_FILE"
+DEFAULT_OPENBAO_SECRET_PATH = "secret/data/netcup-dyndns"
+
+
+def fetch_openbao_secrets(env=None):
+    """Optionally fetch a KV v2 secret from an OpenBAO (or Vault-compatible) server.
+
+    Entirely opt-in and controlled via environment variables:
+      OPENBAO_ADDR         - base URL, e.g. https://openbao.example.com:8200
+      OPENBAO_TOKEN        - auth token (or OPENBAO_TOKEN_FILE to read it from a file)
+      OPENBAO_SECRET_PATH  - KV v2 path, e.g. secret/data/netcup-dyndns (default shown)
+
+    Returns a dict of settings keys to override, limited to known settings keys.
+    Returns {} if OPENBAO_ADDR is not configured or the request/parsing fails.
+    """
+    env = os.environ if env is None else env
+    addr = env.get("OPENBAO_ADDR")
+    if not addr:
+        return {}
+
+    token = env.get("OPENBAO_TOKEN")
+    token_file = env.get("OPENBAO_TOKEN_FILE")
+    if not token and token_file:
+        try:
+            token = Path(token_file).read_text().strip()
+        except OSError as e:
+            logger.warning("Could not read OpenBAO token file %s: %s", token_file, e)
+            return {}
+
+    if not token:
+        logger.warning(
+            "OPENBAO_ADDR is set but no OPENBAO_TOKEN or OPENBAO_TOKEN_FILE was provided."
+        )
+        return {}
+
+    secret_path = env.get("OPENBAO_SECRET_PATH", DEFAULT_OPENBAO_SECRET_PATH)
+    url = f"{addr.rstrip('/')}/v1/{secret_path.lstrip('/')}"
+
+    try:
+        response = requests.get(url, headers={"X-Vault-Token": token}, timeout=5)
+        response.raise_for_status()
+        payload = response.json()
+    except requests.exceptions.RequestException as e:
+        logger.warning("Could not fetch secrets from OpenBAO at %s: %s", url, e)
+        return {}
+    except ValueError as e:
+        logger.warning("Invalid JSON response from OpenBAO at %s: %s", url, e)
+        return {}
+
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    # KV v2 nests the actual secret data under an extra "data" key.
+    if isinstance(data.get("data"), dict):
+        data = data["data"]
+
+    return {key: value for key, value in data.items() if key in default_settings}
+
+
+def apply_file_secret_overrides(settings, env=None):
+    """Override settings values from `<KEY>_FILE` environment variables pointing at
+    mounted secret files (Docker secrets / Kubernetes secrets / OpenBAO Agent
+    injector convention). Silently skipped for keys without a corresponding
+    `<KEY>_FILE` variable set.
+    """
+    env = os.environ if env is None else env
+    for key in default_settings:
+        file_path = env.get(f"{key}{SECRET_FILE_ENV_SUFFIX}")
+        if not file_path:
+            continue
+        try:
+            settings[key] = Path(file_path).read_text().strip()
+        except OSError as e:
+            logger.warning(
+                "Could not read secret file %s for %s: %s", file_path, key, e
+            )
+            continue
+        logger.info("Overrode setting %s from secret file %s", key, file_path)
+    return settings
+
+
+def apply_secret_overrides(settings, env=None):
+    """Apply optional runtime secret overrides on top of the values loaded from
+    `.settings.json`. Both mechanisms are opt-in and disabled by default:
+
+      1. Direct retrieval of a KV v2 secret from an OpenBAO (or Vault-compatible)
+         server (see `fetch_openbao_secrets`).
+      2. `<KEY>_FILE` environment variables pointing at mounted secret files (see
+         `apply_file_secret_overrides`), which take precedence over OpenBAO since
+         they are applied last.
+    """
+    settings.update(fetch_openbao_secrets(env))
+    apply_file_secret_overrides(settings, env)
+    return settings
 
 
 def get_parallel_processes(settings):
@@ -374,6 +471,7 @@ def main():
 
     with open(conf) as fp:
         settings = json.load(fp)
+        settings = apply_secret_overrides(settings)
         validate_settings(settings)
 
     IPv4 = requests.get(url=IPV4_API).json()["ip"]
@@ -395,6 +493,7 @@ def main():
     try:
         with open(conf) as fp:
             settings = json.load(fp)
+            settings = apply_secret_overrides(settings)
             try:
                 validate_settings(settings)
                 API_PASSWORD = settings["API_PASSWORD"]

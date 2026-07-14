@@ -1,0 +1,40 @@
+services:
+  netcup-dyndns-updater:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: netcup-dyndns-and-trusted-proxies-updater:latest
+    container_name: netcup-dyndns-updater
+    restart: unless-stopped
+    environment:
+      # Run continuously, checking for IP changes every 300s (5 minutes).
+      # Set RUN_ONCE=true instead if you prefer to trigger runs via an
+      # external cron job / systemd timer with `docker compose run --rm`.
+      UPDATE_INTERVAL_SECONDS: "300"
+
+      # --- Optional: OpenBAO / Vault-compatible secret provider ---------
+      # When set, secrets are fetched at runtime from a KV v2 secret and
+      # override the matching values from .settings.json. See README.md.
+      # OPENBAO_ADDR: "https://openbao.example.internal:8200"
+      # OPENBAO_TOKEN_FILE: /run/secrets/openbao_token
+      # OPENBAO_SECRET_PATH: "secret/data/netcup-dyndns"
+
+      # --- Optional: per-key Docker/Kubernetes secret files --------------
+      # API_PASSWORD_FILE: /run/secrets/api_password
+      # API_KEY_FILE: /run/secrets/api_key
+    volumes:
+      # Non-secret configuration; required values not overridden by a
+      # secret provider must still be filled in here (see README.md).
+      - ./.settings.json:/app/.settings.json
+      # Persists the last-seen IP addresses between container restarts.
+      - dyndns-cache:/app/.temp
+    # Uncomment to mount OpenBAO/Docker secrets referenced above:
+    # secrets:
+    #   - openbao_token
+
+# secrets:
+#   openbao_token:
+#     file: ./secrets/openbao_token.txt
+
+volumes:
+  dyndns-cache:

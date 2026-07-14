@@ -103,17 +103,18 @@ def test_main_successful_dns_update(mocker):
     assert post_mock.call_count == 5
 
     # Progress bar is sized from the number of subdomains in NETCUP_DOMAIN (1
-    # subdomain * 2 record types), advances once per successful record update,
-    # and is closed once all records have been updated.
+    # subdomain * 2 record types), advances once per processed domain (by the
+    # fixed record count returned from process_subdomain), and is closed once
+    # all domains have been processed.
     tqdm_mock.assert_called_once()
     assert tqdm_mock.call_args.kwargs["total"] == 2
-    assert progress_bar_mock.update.call_count == 2
-    progress_bar_mock.update.assert_called_with(1)
+    assert progress_bar_mock.update.call_count == 1
+    progress_bar_mock.update.assert_called_with(2)
     progress_bar_mock.close.assert_called_once()
 
 
-def test_main_exits_when_login_fails(mocker):
-    """If the Netcup API login fails, main should exit(1) without further requests."""
+def test_main_continues_when_login_fails(mocker):
+    """If the Netcup API login fails for a domain, main should log the error and continue (no SystemExit)."""
     _common_mocks(mocker, cached_ipv4=None, cached_ipv6=None)
     mocker.patch("requests.get", side_effect=_mock_ip_get_responses(mocker))
     mocker.patch("src.updateDynDns.nginx_trusted_proxies_configuration")
@@ -122,15 +123,15 @@ def test_main_exits_when_login_fails(mocker):
     login_response.json.return_value = {"status": "failed"}
     post_mock = mocker.patch("requests.post", return_value=login_response)
 
-    with pytest.raises(SystemExit) as exc_info:
-        main()
+    main()
 
-    assert exc_info.value.code == 1
+    # Login failure short-circuits before the finally/logout block, so only
+    # the single login request is made.
     assert post_mock.call_count == 1
 
 
-def test_main_exits_when_info_dns_records_fails(mocker):
-    """If fetching the DNS records fails, main should exit(1)."""
+def test_main_continues_when_info_dns_records_fails(mocker):
+    """If fetching the DNS records fails, main should log the error, still log out, and continue (no SystemExit)."""
     _common_mocks(mocker, cached_ipv4=None, cached_ipv6=None)
     mocker.patch("requests.get", side_effect=_mock_ip_get_responses(mocker))
     mocker.patch("src.updateDynDns.nginx_trusted_proxies_configuration")
@@ -142,19 +143,19 @@ def test_main_exits_when_info_dns_records_fails(mocker):
     }
     info_response = mocker.MagicMock()
     info_response.json.return_value = {"status": "failed"}
+    logout_response = mocker.MagicMock()
+    logout_response.json.return_value = {"status": "success"}
     post_mock = mocker.patch(
-        "requests.post", side_effect=[login_response, info_response]
+        "requests.post", side_effect=[login_response, info_response, logout_response]
     )
 
-    with pytest.raises(SystemExit) as exc_info:
-        main()
+    main()
 
-    assert exc_info.value.code == 1
-    assert post_mock.call_count == 2
+    assert post_mock.call_count == 3
 
 
-def test_main_exits_when_update_a_record_fails(mocker):
-    """If updating the A record fails, main should exit(1) and still close the progress bar."""
+def test_main_continues_when_update_a_record_fails(mocker):
+    """If updating the A record fails, main should log the error, still log out, and close the progress bar (no SystemExit)."""
     _common_mocks(mocker, cached_ipv4=None, cached_ipv6=None)
     mocker.patch("requests.get", side_effect=_mock_ip_get_responses(mocker))
     mocker.patch("src.updateDynDns.nginx_trusted_proxies_configuration")
@@ -175,23 +176,24 @@ def test_main_exits_when_update_a_record_fails(mocker):
     }
     update_a_response = mocker.MagicMock()
     update_a_response.json.return_value = {"status": "failed"}
+    logout_response = mocker.MagicMock()
+    logout_response.json.return_value = {"status": "success"}
     post_mock = mocker.patch(
         "requests.post",
-        side_effect=[login_response, info_response, update_a_response],
+        side_effect=[login_response, info_response, update_a_response, logout_response],
     )
 
-    with pytest.raises(SystemExit) as exc_info:
-        main()
+    main()
 
-    assert exc_info.value.code == 1
-    assert post_mock.call_count == 3
+    # login + info + update (failed) + logout (still attempted in finally)
+    assert post_mock.call_count == 4
     # The progress bar must be closed even when a record update fails part-way.
     progress_bar_mock.close.assert_called_once()
-    progress_bar_mock.update.assert_not_called()
+    progress_bar_mock.update.assert_called_once_with(2)
 
 
-def test_main_exits_when_logout_fails(mocker):
-    """If logging out from the Netcup API fails, main should exit(1)."""
+def test_main_continues_when_logout_fails(mocker):
+    """If logging out from the Netcup API fails, main should log the error and continue (no SystemExit)."""
     _common_mocks(mocker, cached_ipv4=None, cached_ipv6=None)
     mocker.patch("requests.get", side_effect=_mock_ip_get_responses(mocker))
     mocker.patch("src.updateDynDns.nginx_trusted_proxies_configuration")
@@ -213,15 +215,13 @@ def test_main_exits_when_logout_fails(mocker):
         side_effect=[login_response, info_response, logout_response],
     )
 
-    with pytest.raises(SystemExit) as exc_info:
-        main()
+    main()
 
-    assert exc_info.value.code == 1
     assert post_mock.call_count == 3
 
 
-def test_main_exits_when_update_aaaa_record_fails(mocker):
-    """If updating the AAAA record fails, main should exit(1)."""
+def test_main_continues_when_update_aaaa_record_fails(mocker):
+    """If updating the AAAA record fails, main should log the error, still log out, and continue (no SystemExit)."""
     _common_mocks(mocker, cached_ipv4=None, cached_ipv6=None)
     mocker.patch("requests.get", side_effect=_mock_ip_get_responses(mocker))
     mocker.patch("src.updateDynDns.nginx_trusted_proxies_configuration")
@@ -240,16 +240,17 @@ def test_main_exits_when_update_aaaa_record_fails(mocker):
     }
     update_aaaa_response = mocker.MagicMock()
     update_aaaa_response.json.return_value = {"status": "failed"}
+    logout_response = mocker.MagicMock()
+    logout_response.json.return_value = {"status": "success"}
     post_mock = mocker.patch(
         "requests.post",
-        side_effect=[login_response, info_response, update_aaaa_response],
+        side_effect=[login_response, info_response, update_aaaa_response, logout_response],
     )
 
-    with pytest.raises(SystemExit) as exc_info:
-        main()
+    main()
 
-    assert exc_info.value.code == 1
-    assert post_mock.call_count == 3
+    # login + info + update (failed) + logout (still attempted in finally)
+    assert post_mock.call_count == 4
 
 
 def test_main_continues_without_ipv6_on_request_exception(mocker):
@@ -334,6 +335,7 @@ def test_main_updates_multiple_domains(mocker):
             login_response,
             info_response_example_com,
             update_response,
+            logout_response,
             login_response,
             info_response_example_net,
             update_response,
@@ -344,7 +346,7 @@ def test_main_updates_multiple_domains(mocker):
     main()
 
     write_cached_ips_mock.assert_called_once_with("1.2.3.4", "::1")
-    assert post_mock.call_count == 7
+    assert post_mock.call_count == 8
 
 
 def test_main_exits_when_settings_file_missing(mocker):
