@@ -23,12 +23,17 @@ def _mock_ip_get_responses(mocker, ipv4="1.2.3.4", ipv6="::1"):
     return [ipv4_response, ipv6_response]
 
 
-def _common_mocks(mocker, cached_ipv4=None, cached_ipv6=None):
+def _common_mocks(mocker, cached_ipv4=None, cached_ipv6=None, failed_domains=None):
     mocker.patch("src.updateDynDns.create_settings_file_if_not_exists")
     mocker.patch(
         "src.updateDynDns.read_cached_ips", return_value=(cached_ipv4, cached_ipv6)
     )
     write_cached_ips_mock = mocker.patch("src.updateDynDns.write_cached_ips")
+    mocker.patch(
+        "src.updateDynDns.read_failed_domains",
+        return_value=dict(failed_domains) if failed_domains else {},
+    )
+    mocker.patch("src.updateDynDns.write_failed_domains")
     mocker.patch(
         "builtins.open", mocker.mock_open(read_data=json.dumps(MOCK_SETTINGS))
     )
@@ -354,6 +359,8 @@ def test_main_exits_when_settings_file_missing(mocker):
     mocker.patch("src.updateDynDns.create_settings_file_if_not_exists")
     mocker.patch("src.updateDynDns.read_cached_ips", return_value=(None, None))
     mocker.patch("src.updateDynDns.write_cached_ips")
+    mocker.patch("src.updateDynDns.read_failed_domains", return_value={})
+    mocker.patch("src.updateDynDns.write_failed_domains")
     mocker.patch("requests.get", side_effect=_mock_ip_get_responses(mocker))
 
     mock_open = mocker.mock_open(read_data=json.dumps(MOCK_SETTINGS))
@@ -377,6 +384,8 @@ def test_main_exits_when_settings_key_missing_on_reload(mocker):
     mocker.patch("src.updateDynDns.create_settings_file_if_not_exists")
     mocker.patch("src.updateDynDns.read_cached_ips", return_value=(None, None))
     mocker.patch("src.updateDynDns.write_cached_ips")
+    mocker.patch("src.updateDynDns.read_failed_domains", return_value={})
+    mocker.patch("src.updateDynDns.write_failed_domains")
     mocker.patch("requests.get", side_effect=_mock_ip_get_responses(mocker))
 
     call_count = {"n": 0}

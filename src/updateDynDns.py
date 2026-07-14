@@ -1,3 +1,4 @@
+import argparse
 import logging
 import os
 import sys
@@ -51,11 +52,16 @@ NETCUP_API = "https://ccp.netcup.net/run/webservice/servers/endpoint.php?JSON"
 IPV4_API = "https://api.ipify.org?format=json"
 IPV6_API = "https://api6.ipify.org?format=json"
 
+RED_COLOR = "\033[91m"
+RESET_COLOR = "\033[0m"
+
 # default .settings.json values
 settings_file_path = ".settings.json"
 DEFAULT_PARALLEL_PROCESSES = 1  # Standardmäßig sequentiell (1 Worker)
 DEFAULT_IP_MODE = "both"
 VALID_IP_MODES = {"ipv4", "ipv6", "both"}
+MAX_SUBDOMAIN_RETRIES = 5
+failed_domains_cache_file = "failed_domains.json"
 
 default_settings = {
     "API_PASSWORD": "",
@@ -100,6 +106,34 @@ def write_cached_ips(ipv4, ipv6=None, cache_dir=cache_dir):
     # connectivity) are written as an empty string and read back as None.
     (cache_path / "ipv4_cache.txt").write_text(ipv4 or "")
     (cache_path / "ipv6_cache.txt").write_text(ipv6 or "")
+
+
+# Function to read the per-subdomain failure/retry counters from cache
+def read_failed_domains(cache_dir=cache_dir):
+    """Return a dict mapping a failed subdomain (e.g. "sub.example.com") to the
+    number of consecutive failed update attempts recorded for it. Returns an
+    empty dict if the cache file is missing or unreadable/invalid.
+    """
+    cache_path = Path(cache_dir) / failed_domains_cache_file
+    try:
+        data = json.loads(cache_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(domain): int(count)
+        for domain, count in data.items()
+        if isinstance(count, (int, float))
+    }
+
+
+# Function to write the per-subdomain failure/retry counters to cache
+def write_failed_domains(failed_domains, cache_dir=cache_dir):
+    """Persist the per-subdomain failure/retry counters to cache."""
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+    (cache_path / failed_domains_cache_file).write_text(json.dumps(failed_domains))
 
 
 # Validates values in settings.json
@@ -216,6 +250,124 @@ def apply_secret_overrides(settings, env=None):
     return settings
 
 
+CLI_ARGUMENT_TO_SETTINGS_KEY = {
+    "api_password": "API_PASSWORD",
+    "api_key": "API_KEY",
+    "customer_id": "CUSTOMER_ID",
+    "netcup_domain": "NETCUP_DOMAIN",
+    "nextcloud_path": "NEXTCLOUD_PATH",
+    "trusted_proxies_pos": "TRUSTED_PROXIES_POS",
+    "parallel_processes": "PARALLEL_PROCESSES",
+    "ip_mode": "IP_MODE",
+    "disable_nextcloud_nginx": "DISABLE_NEXTCLOUD_NGINX",
+}
+
+
+def build_arg_parser():
+    """Build the command-line argument parser.
+
+    Every option corresponds to a key in `.settings.json`. When provided, a
+    command-line argument always takes precedence over both the settings
+    file and any secret provider overrides, since CLI overrides are applied
+    last. Running with -h/--help prints all available options and exits.
+    """
+    parser = argparse.ArgumentParser(
+        prog="updateDynDns",
+        description=(
+            "Updates Netcup DNS A/AAAA records with the host's current public IP "
+            "address(es) and, optionally, the Nextcloud trusted_proxies "
+            "configuration. Any option given here overrides the corresponding "
+            "value from .settings.json (and any secret provider)."
+        ),
+    )
+    parser.add_argument(
+        "--api-password",
+        dest="api_password",
+        default=None,
+        help="Netcup API password. Overrides API_PASSWORD.",
+    )
+    parser.add_argument(
+        "--api-key",
+        dest="api_key",
+        default=None,
+        help="Netcup API key. Overrides API_KEY.",
+    )
+    parser.add_argument(
+        "--customer-id",
+        dest="customer_id",
+        default=None,
+        help="Netcup customer ID. Overrides CUSTOMER_ID.",
+    )
+    parser.add_argument(
+        "--netcup-domain",
+        dest="netcup_domain",
+        default=None,
+        help=(
+            "Comma-separated domain(s) to update, e.g. "
+            "'example.com,example.net'. Overrides NETCUP_DOMAIN."
+        ),
+    )
+    parser.add_argument(
+        "--nextcloud-path",
+        dest="nextcloud_path",
+        default=None,
+        help="Path to the Nextcloud installation. Overrides NEXTCLOUD_PATH.",
+    )
+    parser.add_argument(
+        "--trusted-proxies-pos",
+        dest="trusted_proxies_pos",
+        default=None,
+        help=(
+            "Position in the trusted_proxies configuration to update. "
+            "Overrides TRUSTED_PROXIES_POS."
+        ),
+    )
+    parser.add_argument(
+        "--parallel-processes",
+        dest="parallel_processes",
+        type=int,
+        default=None,
+        help="Number of parallel DNS-update workers. Overrides PARALLEL_PROCESSES.",
+    )
+    parser.add_argument(
+        "--ip-mode",
+        dest="ip_mode",
+        choices=sorted(VALID_IP_MODES),
+        default=None,
+        help="Which IP types to update: 'both' (default), 'ipv4', or 'ipv6'. Overrides IP_MODE.",
+    )
+    parser.add_argument(
+        "--disable-nextcloud-nginx",
+        dest="disable_nextcloud_nginx",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Disable the Nextcloud OCC / Nginx reload tasks (use "
+            "--no-disable-nextcloud-nginx to force-enable them). "
+            "Overrides DISABLE_NEXTCLOUD_NGINX."
+        ),
+    )
+    return parser
+
+
+def parse_cli_args(argv=None):
+    """Parse command-line arguments. Passing -h/--help exits the process
+    after printing usage information for all available options."""
+    return build_arg_parser().parse_args(argv)
+
+
+def apply_cli_overrides(settings, args):
+    """Apply command-line argument overrides on top of `.settings.json` and any
+    secret provider overrides. Only explicitly provided (non-None) arguments
+    are applied, and they always take precedence since they are applied last.
+    """
+    for arg_name, settings_key in CLI_ARGUMENT_TO_SETTINGS_KEY.items():
+        value = getattr(args, arg_name, None)
+        if value is not None:
+            settings[settings_key] = value
+    return settings
+
+
 def get_parallel_processes(settings):
     """Return the configured number of parallel DNS-update workers (default: 1)."""
     value = settings.get("PARALLEL_PROCESSES", DEFAULT_PARALLEL_PROCESSES)
@@ -296,6 +448,31 @@ def format_update_summary(updated_records):
                     "  - {subdomain:<12} {record_type:<5} -> {destination}".format(**record)
                 )
     return "\n".join(lines)
+
+
+def split_domain(domain_str):
+    """Split a configured domain entry into (subdomain, domain), mirroring the
+    logic used by process_subdomain. Falls back to (domain_str, domain_str)
+    for entries without a subdomain part."""
+    split = domain_str.split(".")
+    if len(split) < 2:
+        return domain_str, domain_str
+    return split[0], ".".join(split[1:])
+
+
+def build_exhausted_domain_entry(domain_str, max_retries=MAX_SUBDOMAIN_RETRIES):
+    """Build a summary entry warning the admin that a subdomain has kept
+    failing to update after exhausting its retry budget."""
+    subdomain, domain = split_domain(domain_str)
+    return {
+        "domain": domain,
+        "subdomain": subdomain,
+        "record_type": "A/AAAA",
+        "destination": (
+            f"{RED_COLOR}CONFIG CHECK NEEDED - still failing after "
+            f"{max_retries} attempts{RESET_COLOR}"
+        ),
+    }
 
 
 def process_subdomain(domain_str, settings, IPv4, IPv6):
@@ -465,13 +642,17 @@ def process_subdomain(domain_str, settings, IPv4, IPv6):
             pass
 
 
-def main():
+def main(argv=None):
+    args = parse_cli_args(argv if argv is not None else [])
+
     create_settings_file_if_not_exists(settings_file_path, default_settings)
     cached_ipv4, cached_ipv6 = read_cached_ips()
+    failed_domains = read_failed_domains()
 
     with open(conf) as fp:
         settings = json.load(fp)
         settings = apply_secret_overrides(settings)
+        settings = apply_cli_overrides(settings, args)
         validate_settings(settings)
 
     IPv4 = requests.get(url=IPV4_API).json()["ip"]
@@ -484,16 +665,41 @@ def main():
         IPv6 = None
         logger.warning("No IPv6 address found. IPv6 cache will not be written: %s", e)
 
-    if IPv4 == cached_ipv4 and IPv6 == cached_ipv6:
+    ip_changed = not (IPv4 == cached_ipv4 and IPv6 == cached_ipv6)
+    pending_retry_domains = {
+        domain for domain, count in failed_domains.items() if count < MAX_SUBDOMAIN_RETRIES
+    }
+    exhausted_domains = sorted(
+        domain for domain, count in failed_domains.items() if count >= MAX_SUBDOMAIN_RETRIES
+    )
+
+    if not ip_changed and not pending_retry_domains:
         logger.info("IP addresses have not changed. No update necessary.")
+        if exhausted_domains:
+            logger.warning(
+                "%d subdomain(s) are still failing to update. Summary:\n%s",
+                len(exhausted_domains),
+                format_update_summary(
+                    [build_exhausted_domain_entry(domain) for domain in exhausted_domains]
+                ),
+            )
         sys.exit(0)
 
-    write_cached_ips(IPv4, IPv6)
+    if ip_changed:
+        write_cached_ips(IPv4, IPv6)
+    else:
+        logger.info(
+            "IP addresses have not changed, but %d previously failed subdomain(s) "
+            "will be retried: %s",
+            len(pending_retry_domains),
+            ", ".join(sorted(pending_retry_domains)),
+        )
 
     try:
         with open(conf) as fp:
             settings = json.load(fp)
             settings = apply_secret_overrides(settings)
+            settings = apply_cli_overrides(settings, args)
             try:
                 validate_settings(settings)
                 API_PASSWORD = settings["API_PASSWORD"]
@@ -520,7 +726,22 @@ def main():
     else:
         nginx_trusted_proxies_configuration(NEXTCLOUD_PATH, TRUSTED_PROXIES_POS, IPv6)
 
-    domains_list = [domain.strip() for domain in NETCUP_DOMAIN.split(",")]
+    configured_domains = [domain.strip() for domain in NETCUP_DOMAIN.split(",")]
+
+    if ip_changed:
+        # A real IP change always requires updating every configured domain,
+        # including ones that previously failed or even exhausted their
+        # retry budget - it's worth giving them another chance.
+        domains_list = configured_domains
+    else:
+        # IP unchanged: only forcibly retry subdomains that previously failed
+        # and have not yet exhausted their retry budget. Domains that already
+        # exhausted their retries are left alone to avoid wasting API calls
+        # until a real IP change happens again.
+        domains_list = [
+            domain for domain in configured_domains if domain in pending_retry_domains
+        ]
+
     logger.info(
         "Updating DNS records for %d domain(s): %s",
         len(domains_list),
@@ -536,6 +757,7 @@ def main():
     )
 
     updated_records = []
+    domain_had_error = {}
     parallel_workers = get_parallel_processes(settings)
 
     if parallel_workers > 1:
@@ -552,26 +774,52 @@ def main():
                 try:
                     res, count = future.result()
                     updated_records.extend(res)
+                    domain_had_error[domain] = any(RED_COLOR in r["destination"] for r in res)
                 except Exception as exc:
                     logger.error("%r generated an exception: %s", domain, exc)
                     # Falls der ganze Thread crasht, fügen wir einen Fehlereintrag hinzu
-                    RED = "\033[91m"
-                    RESET = "\033[0m"
                     updated_records.append({
                         "domain": domain,
                         "subdomain": "Error",
                         "record_type": "A/AAAA",
-                        "destination": f"{RED}THREAD CRASHED{RESET}"
+                        "destination": f"{RED_COLOR}THREAD CRASHED{RESET_COLOR}"
                     })
+                    domain_had_error[domain] = True
                 progress_bar.update(2)
     else:
         logger.info("Running sequentially (PARALLEL_PROCESSES <= 1).")
         for domain in domains_list:
             res, count = process_subdomain(domain, settings, IPv4, IPv6)
             updated_records.extend(res)
+            domain_had_error[domain] = any(RED_COLOR in r["destination"] for r in res)
             progress_bar.update(count)
 
     progress_bar.close()
+
+    # Update the failure-retry cache: domains that succeeded are cleared,
+    # domains that failed again have their counter incremented (capped at
+    # MAX_SUBDOMAIN_RETRIES so they don't keep being force-retried forever).
+    for domain, had_error in domain_had_error.items():
+        if had_error:
+            failed_domains[domain] = min(
+                failed_domains.get(domain, 0) + 1, MAX_SUBDOMAIN_RETRIES
+            )
+        else:
+            failed_domains.pop(domain, None)
+
+    # Drop stale entries for domains no longer present in NETCUP_DOMAIN.
+    failed_domains = {
+        domain: count for domain, count in failed_domains.items() if domain in configured_domains
+    }
+    write_failed_domains(failed_domains)
+
+    exhausted_domains = sorted(
+        domain for domain, count in failed_domains.items() if count >= MAX_SUBDOMAIN_RETRIES
+    )
+    if exhausted_domains:
+        updated_records.extend(
+            build_exhausted_domain_entry(domain) for domain in exhausted_domains
+        )
 
     logger.info(
         "DNS update process finished. Summary:\n%s",
@@ -580,4 +828,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
