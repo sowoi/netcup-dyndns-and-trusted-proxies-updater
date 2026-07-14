@@ -68,3 +68,29 @@ def test_read_cached_ips(mocker):
 
     assert ipv4 is None
     assert ipv6 is None
+
+
+def test_write_cached_ips_handles_missing_ipv6(delete_ip_cache):
+    """write_cached_ips must not crash when IPv6 is unavailable (None)."""
+    temp_test_directory_path = Path(__file__).parent / ".temp/"
+    temp_test_directory_path.mkdir(parents=True, exist_ok=True)
+
+    write_cached_ips("1.2.3.4", None, cache_dir=temp_test_directory_path)
+
+    ipv4_path = temp_test_directory_path / "ipv4_cache.txt"
+    ipv6_path = temp_test_directory_path / "ipv6_cache.txt"
+
+    assert ipv4_path.read_text() == "1.2.3.4"
+    assert ipv6_path.read_text() == ""
+
+
+def test_read_cached_ips_returns_none_for_empty_ipv6_cache(delete_ip_cache):
+    """An empty cache file (written when IPv6 was unavailable) reads back as None."""
+    temp_test_directory_path = Path(__file__).parent / ".temp/"
+    temp_test_directory_path.mkdir(parents=True, exist_ok=True)
+
+    write_cached_ips("1.2.3.4", None, cache_dir=temp_test_directory_path)
+    ipv4, ipv6 = read_cached_ips(cache_dir=temp_test_directory_path)
+
+    assert ipv4 == "1.2.3.4"
+    assert ipv6 is None

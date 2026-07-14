@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 import threading
 import requests
@@ -50,10 +51,9 @@ NETCUP_API = "https://ccp.netcup.net/run/webservice/servers/endpoint.php?JSON"
 IPV4_API = "https://api.ipify.org?format=json"
 IPV6_API = "https://api6.ipify.org?format=json"
 
-
 # default .settings.json values
 settings_file_path = ".settings.json"
-DEFAULT_PARALLEL_PROCESSES = 2
+DEFAULT_PARALLEL_PROCESSES = 1  # Standardmäßig sequentiell (1 Worker)
 DEFAULT_IP_MODE = "both"
 VALID_IP_MODES = {"ipv4", "ipv6", "both"}
 
@@ -66,6 +66,7 @@ default_settings = {
     "TRUSTED_PROXIES_POS": "",
     "PARALLEL_PROCESSES": DEFAULT_PARALLEL_PROCESSES,
     "IP_MODE": DEFAULT_IP_MODE,
+    "DISABLE_NEXTCLOUD_NGINX": False,
 }
 
 
@@ -83,8 +84,8 @@ def create_settings_file_if_not_exists(file_path, default_content):
 def read_cached_ips(ipv4_cache=None, ipv6_cache=None, cache_dir=cache_dir):
     cache_path = Path(cache_dir)
     try:
-        ipv4_cache = (cache_path / "ipv4_cache.txt").read_text()
-        ipv6_cache = (cache_path / "ipv6_cache.txt").read_text()
+        ipv4_cache = (cache_path / "ipv4_cache.txt").read_text() or None
+        ipv6_cache = (cache_path / "ipv6_cache.txt").read_text() or None
     except FileNotFoundError:
         pass
     return ipv4_cache, ipv6_cache
@@ -95,8 +96,10 @@ def write_cached_ips(ipv4, ipv6=None, cache_dir=cache_dir):
     cache_path = Path(cache_dir)
     cache_path.mkdir(parents=True, exist_ok=True)
 
-    (cache_path / "ipv4_cache.txt").write_text(ipv4)
-    (cache_path / "ipv6_cache.txt").write_text(ipv6)
+    # Cache files always store a string; unavailable addresses (e.g. no IPv6
+    # connectivity) are written as an empty string and read back as None.
+    (cache_path / "ipv4_cache.txt").write_text(ipv4 or "")
+    (cache_path / "ipv6_cache.txt").write_text(ipv6 or "")
 
 
 # Validates values in settings.json
@@ -106,9 +109,10 @@ def validate_settings(settings):
         "API_KEY",
         "CUSTOMER_ID",
         "NETCUP_DOMAIN",
-        "NEXTCLOUD_PATH",
-        "TRUSTED_PROXIES_POS",
     ]
+    if not settings.get("DISABLE_NEXTCLOUD_NGINX", False):
+        required_keys.extend(["NEXTCLOUD_PATH", "TRUSTED_PROXIES_POS"])
+
     for key in required_keys:
         if key not in settings:
             raise KeyError(f"The key {key} is missing in the configuration file.")
@@ -118,8 +122,102 @@ def validate_settings(settings):
             )
 
 
+SECRET_FILE_ENV_SUFFIX = "_FILE"
+DEFAULT_OPENBAO_SECRET_PATH = "secret/data/netcup-dyndns"
+
+
+def fetch_openbao_secrets(env=None):
+    """Optionally fetch a KV v2 secret from an OpenBAO (or Vault-compatible) server.
+
+    Entirely opt-in and controlled via environment variables:
+      OPENBAO_ADDR         - base URL, e.g. https://openbao.example.com:8200
+      OPENBAO_TOKEN        - auth token (or OPENBAO_TOKEN_FILE to read it from a file)
+      OPENBAO_SECRET_PATH  - KV v2 path, e.g. secret/data/netcup-dyndns (default shown)
+
+    Returns a dict of settings keys to override, limited to known settings keys.
+    Returns {} if OPENBAO_ADDR is not configured or the request/parsing fails.
+    """
+    env = os.environ if env is None else env
+    addr = env.get("OPENBAO_ADDR")
+    if not addr:
+        return {}
+
+    token = env.get("OPENBAO_TOKEN")
+    token_file = env.get("OPENBAO_TOKEN_FILE")
+    if not token and token_file:
+        try:
+            token = Path(token_file).read_text().strip()
+        except OSError as e:
+            logger.warning("Could not read OpenBAO token file %s: %s", token_file, e)
+            return {}
+
+    if not token:
+        logger.warning(
+            "OPENBAO_ADDR is set but no OPENBAO_TOKEN or OPENBAO_TOKEN_FILE was provided."
+        )
+        return {}
+
+    secret_path = env.get("OPENBAO_SECRET_PATH", DEFAULT_OPENBAO_SECRET_PATH)
+    url = f"{addr.rstrip('/')}/v1/{secret_path.lstrip('/')}"
+
+    try:
+        response = requests.get(url, headers={"X-Vault-Token": token}, timeout=5)
+        response.raise_for_status()
+        payload = response.json()
+    except requests.exceptions.RequestException as e:
+        logger.warning("Could not fetch secrets from OpenBAO at %s: %s", url, e)
+        return {}
+    except ValueError as e:
+        logger.warning("Invalid JSON response from OpenBAO at %s: %s", url, e)
+        return {}
+
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    # KV v2 nests the actual secret data under an extra "data" key.
+    if isinstance(data.get("data"), dict):
+        data = data["data"]
+
+    return {key: value for key, value in data.items() if key in default_settings}
+
+
+def apply_file_secret_overrides(settings, env=None):
+    """Override settings values from `<KEY>_FILE` environment variables pointing at
+    mounted secret files (Docker secrets / Kubernetes secrets / OpenBAO Agent
+    injector convention). Silently skipped for keys without a corresponding
+    `<KEY>_FILE` variable set.
+    """
+    env = os.environ if env is None else env
+    for key in default_settings:
+        file_path = env.get(f"{key}{SECRET_FILE_ENV_SUFFIX}")
+        if not file_path:
+            continue
+        try:
+            settings[key] = Path(file_path).read_text().strip()
+        except OSError as e:
+            logger.warning(
+                "Could not read secret file %s for %s: %s", file_path, key, e
+            )
+            continue
+        logger.info("Overrode setting %s from secret file %s", key, file_path)
+    return settings
+
+
+def apply_secret_overrides(settings, env=None):
+    """Apply optional runtime secret overrides on top of the values loaded from
+    `.settings.json`. Both mechanisms are opt-in and disabled by default:
+
+      1. Direct retrieval of a KV v2 secret from an OpenBAO (or Vault-compatible)
+         server (see `fetch_openbao_secrets`).
+      2. `<KEY>_FILE` environment variables pointing at mounted secret files (see
+         `apply_file_secret_overrides`), which take precedence over OpenBAO since
+         they are applied last.
+    """
+    settings.update(fetch_openbao_secrets(env))
+    apply_file_secret_overrides(settings, env)
+    return settings
+
+
 def get_parallel_processes(settings):
-    """Return the configured number of parallel DNS-update workers (default: 2)."""
+    """Return the configured number of parallel DNS-update workers (default: 1)."""
     value = settings.get("PARALLEL_PROCESSES", DEFAULT_PARALLEL_PROCESSES)
     try:
         value = int(value)
@@ -195,11 +293,176 @@ def format_update_summary(updated_records):
                 )
             else:
                 lines.append(
-                    "  - {subdomain:<12} {record_type:<5} -> {destination}".format(
-                        **record
-                    )
+                    "  - {subdomain:<12} {record_type:<5} -> {destination}".format(**record)
                 )
     return "\n".join(lines)
+
+
+def process_subdomain(domain_str, settings, IPv4, IPv6):
+    """Processes a single subdomain. Safe to run in parallel threads."""
+    RED = "\033[91m"
+    RESET = "\033[0m"
+
+    API_PASSWORD = settings["API_PASSWORD"]
+    API_KEY = settings["API_KEY"]
+    CUSTOMER_ID = settings["CUSTOMER_ID"]
+    ip_mode = get_ip_mode(settings)
+
+    results = []
+    split = domain_str.split(".")
+    if len(split) < 2:
+        logger.error("Invalid domain format: %s", domain_str)
+        return [{"domain": domain_str, "subdomain": domain_str, "record_type": "A/AAAA",
+                 "destination": f"{RED}INVALID FORMAT{RESET}"}], 2
+
+    SUBDOMAIN, DOMAIN = split[0], ".".join(split[1:])
+
+    loginRequest = {
+        "action": "login",
+        "param": {
+            "customernumber": CUSTOMER_ID,
+            "apikey": API_KEY,
+            "apipassword": API_PASSWORD,
+        },
+    }
+
+    try:
+        loginResponse = requests.post(url=NETCUP_API, json=loginRequest).json()
+    except Exception as e:
+        logger.error("HTTP Error during login for %s: %s", domain_str, e)
+        return [{"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A/AAAA",
+                 "destination": f"{RED}LOGIN FAILED{RESET}"}], 2
+
+    if loginResponse.get("status") != "success":
+        logger.error("Could not login at netcup API server for %s", domain_str)
+        return [{"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A/AAAA",
+                 "destination": f"{RED}LOGIN REFUSED{RESET}"}], 2
+
+    apiSessionId = loginResponse["responsedata"]["apisessionid"]
+
+    try:
+        infoDnsRecordsRequest = {
+            "action": "infoDnsRecords",
+            "param": {
+                "domainname": DOMAIN,
+                "customernumber": CUSTOMER_ID,
+                "apikey": API_KEY,
+                "apisessionid": apiSessionId,
+            },
+        }
+
+        infoDnsRecordsResponse = requests.post(url=NETCUP_API, json=infoDnsRecordsRequest).json()
+        if infoDnsRecordsResponse.get("status") != "success":
+            logger.error("Could not retrieve DNS records for %s", DOMAIN)
+            return [{"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A/AAAA",
+                     "destination": f"{RED}FETCH RECORDS FAILED{RESET}"}], 2
+
+        dnsRecords = infoDnsRecordsResponse["responsedata"]["dnsrecords"]
+
+        a_updated = False
+        aaaa_updated = False
+
+        for item in dnsRecords:
+            if item["hostname"] != SUBDOMAIN:
+                continue
+
+            if item["type"] == "A" and ip_mode in ("both", "ipv4") and IPv4 is not None:
+                updateDnsRecordsRequest = {
+                    "action": "updateDnsRecords",
+                    "param": {
+                        "domainname": DOMAIN,
+                        "customernumber": CUSTOMER_ID,
+                        "apikey": API_KEY,
+                        "apisessionid": apiSessionId,
+                        "dnsrecordset": {
+                            "dnsrecords": [
+                                {
+                                    "id": item["id"],
+                                    "hostname": SUBDOMAIN,
+                                    "type": item["type"],
+                                    "destination": IPv4,
+                                }
+                            ]
+                        },
+                    },
+                }
+                try:
+                    updateDnsRecordsResponse = requests.post(url=NETCUP_API, json=updateDnsRecordsRequest).json()
+                    if updateDnsRecordsResponse.get("status") != "success":
+                        logger.error("Could not update A record for %s.%s", SUBDOMAIN, DOMAIN)
+                        results.append({"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A",
+                                        "destination": f"{RED}UPDATE FAILED{RESET}"})
+                    else:
+                        results.append(
+                            {"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A", "destination": IPv4})
+                except Exception as e:
+                    logger.error("Error updating A record for %s.%s: %s", SUBDOMAIN, DOMAIN, e)
+                    results.append({"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A",
+                                    "destination": f"{RED}HTTP ERROR{RESET}"})
+                a_updated = True
+
+            if item["type"] == "AAAA" and ip_mode in ("both", "ipv6") and IPv6 is not None:
+                updateDnsRecordsRequest = {
+                    "action": "updateDnsRecords",
+                    "param": {
+                        "domainname": DOMAIN,
+                        "customernumber": CUSTOMER_ID,
+                        "apikey": API_KEY,
+                        "apisessionid": apiSessionId,
+                        "dnsrecordset": {
+                            "dnsrecords": [
+                                {
+                                    "id": item["id"],
+                                    "hostname": SUBDOMAIN,
+                                    "type": item["type"],
+                                    "destination": IPv6,
+                                }
+                            ]
+                        },
+                    },
+                }
+                try:
+                    updateDnsRecordsResponse = requests.post(url=NETCUP_API, json=updateDnsRecordsRequest).json()
+                    if updateDnsRecordsResponse.get("status") != "success":
+                        logger.error("Could not update AAAA record for %s.%s", SUBDOMAIN, DOMAIN)
+                        results.append({"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "AAAA",
+                                        "destination": f"{RED}UPDATE FAILED{RESET}"})
+                    else:
+                        results.append(
+                            {"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "AAAA", "destination": IPv6})
+                except Exception as e:
+                    logger.error("Error updating AAAA record for %s.%s: %s", SUBDOMAIN, DOMAIN, e)
+                    results.append({"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "AAAA",
+                                    "destination": f"{RED}HTTP ERROR{RESET}"})
+                aaaa_updated = True
+
+        # Fallback falls Einträge nicht existieren
+        if not a_updated and ip_mode in ("both", "ipv4"):
+            results.append({"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A",
+                            "destination": f"{RED}RECORD NOT FOUND{RESET}"})
+        if not aaaa_updated and ip_mode in ("both", "ipv6"):
+            results.append({"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "AAAA",
+                            "destination": f"{RED}RECORD NOT FOUND{RESET}"})
+
+        return results, 2
+
+    except Exception as ex:
+        logger.error("Unexpected error processing %s: %s", domain_str, ex)
+        return [{"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A/AAAA",
+                 "destination": f"{RED}UNEXPECTED ERROR{RESET}"}], 2
+    finally:
+        logoutRequest = {
+            "action": "logout",
+            "param": {
+                "customernumber": CUSTOMER_ID,
+                "apikey": API_KEY,
+                "apisessionid": apiSessionId,
+            },
+        }
+        try:
+            requests.post(url=NETCUP_API, json=logoutRequest)
+        except Exception:
+            pass
 
 
 def main():
@@ -208,6 +471,7 @@ def main():
 
     with open(conf) as fp:
         settings = json.load(fp)
+        settings = apply_secret_overrides(settings)
         validate_settings(settings)
 
     IPv4 = requests.get(url=IPV4_API).json()["ip"]
@@ -229,14 +493,18 @@ def main():
     try:
         with open(conf) as fp:
             settings = json.load(fp)
+            settings = apply_secret_overrides(settings)
             try:
                 validate_settings(settings)
                 API_PASSWORD = settings["API_PASSWORD"]
                 API_KEY = settings["API_KEY"]
                 CUSTOMER_ID = settings["CUSTOMER_ID"]
                 NETCUP_DOMAIN = settings["NETCUP_DOMAIN"]
-                NEXTCLOUD_PATH = settings["NEXTCLOUD_PATH"]
-                TRUSTED_PROXIES_POS = settings["TRUSTED_PROXIES_POS"]
+                DISABLE_NEXTCLOUD_NGINX = settings.get("DISABLE_NEXTCLOUD_NGINX", False)
+
+                if not DISABLE_NEXTCLOUD_NGINX:
+                    NEXTCLOUD_PATH = settings["NEXTCLOUD_PATH"]
+                    TRUSTED_PROXIES_POS = settings["TRUSTED_PROXIES_POS"]
             except KeyError as e:
                 logger.error("Key %s is missing in .settings.json file.", e)
                 sys.exit(1)
@@ -247,7 +515,10 @@ def main():
         logger.error(".settings.json is not a valid JSON document.")
         sys.exit(1)
 
-    nginx_trusted_proxies_configuration(NEXTCLOUD_PATH, TRUSTED_PROXIES_POS, IPv6)
+    if DISABLE_NEXTCLOUD_NGINX:
+        logger.info("Nextcloud and Nginx configuration tasks are disabled via settings.")
+    else:
+        nginx_trusted_proxies_configuration(NEXTCLOUD_PATH, TRUSTED_PROXIES_POS, IPv6)
 
     domains_list = [domain.strip() for domain in NETCUP_DOMAIN.split(",")]
     logger.info(
@@ -264,208 +535,41 @@ def main():
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} records",
     )
 
-    domain_dict = {}
     updated_records = []
+    parallel_workers = get_parallel_processes(settings)
 
-    RED = "\033[91m"
-    RESET = "\033[0m"
-
-    for domain in domains_list:
-        try:
-            split = domain.split(".")
-            if len(split) < 2:
-                logger.error("Invalid domain format: %s", domain)
-                progress_bar.update(2)
-                continue
-
-            SUBDOMAIN, DOMAIN = split[0], ".".join(split[1:])
-
-            domain_dict.setdefault(DOMAIN, []).append(SUBDOMAIN)
-            subdomain_list = domain_dict[DOMAIN]
-
-            loginRequest = {
-                "action": "login",
-                "param": {
-                    "customernumber": CUSTOMER_ID,
-                    "apikey": API_KEY,
-                    "apipassword": API_PASSWORD,
-                },
+    if parallel_workers > 1:
+        logger.info("Running parallel updating using ThreadPoolExecutor with %d workers.", parallel_workers)
+        with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+            # Reiche alle Tasks an den ThreadPool ein
+            future_to_domain = {
+                executor.submit(process_subdomain, domain, settings, IPv4, IPv6): domain
+                for domain in domains_list
             }
-
-            try:
-                loginResponse = requests.post(url=NETCUP_API, json=loginRequest).json()
-            except Exception as e:
-                logger.error("HTTP Error during login for %s: %s", domain, e)
-                updated_records.append(
-                    {
-                        "domain": DOMAIN,
-                        "subdomain": SUBDOMAIN,
+            # Sobald Threads fertig sind, hole die Ergebnisse ab
+            for future in as_completed(future_to_domain):
+                domain = future_to_domain[future]
+                try:
+                    res, count = future.result()
+                    updated_records.extend(res)
+                except Exception as exc:
+                    logger.error("%r generated an exception: %s", domain, exc)
+                    # Falls der ganze Thread crasht, fügen wir einen Fehlereintrag hinzu
+                    RED = "\033[91m"
+                    RESET = "\033[0m"
+                    updated_records.append({
+                        "domain": domain,
+                        "subdomain": "Error",
                         "record_type": "A/AAAA",
-                        "destination": f"{RED}LOGIN FAILED{RESET}",
-                    }
-                )
+                        "destination": f"{RED}THREAD CRASHED{RESET}"
+                    })
                 progress_bar.update(2)
-                continue
-
-            if loginResponse.get("status") != "success":
-                logger.error("Could not login at netcup API server for %s", domain)
-                updated_records.append(
-                    {
-                        "domain": DOMAIN,
-                        "subdomain": SUBDOMAIN,
-                        "record_type": "A/AAAA",
-                        "destination": f"{RED}LOGIN REFUSED{RESET}",
-                    }
-                )
-                progress_bar.update(2)
-                continue
-
-            apiSessionId = loginResponse["responsedata"]["apisessionid"]
-
-            try:
-                infoDnsRecordsRequest = {
-                    "action": "infoDnsRecords",
-                    "param": {
-                        "domainname": DOMAIN,
-                        "customernumber": CUSTOMER_ID,
-                        "apikey": API_KEY,
-                        "apisessionid": apiSessionId,
-                    },
-                }
-
-                infoDnsRecordsResponse = requests.post(
-                    url=NETCUP_API, json=infoDnsRecordsRequest
-                ).json()
-                if infoDnsRecordsResponse.get("status") != "success":
-                    logger.error("Could not retrieve DNS records for %s", DOMAIN)
-                    updated_records.append(
-                        {
-                            "domain": DOMAIN,
-                            "subdomain": SUBDOMAIN,
-                            "record_type": "A/AAAA",
-                            "destination": f"{RED}FETCH RECORDS FAILED{RESET}",
-                        }
-                    )
-                    progress_bar.update(2)
-                    continue
-
-                dnsRecords = infoDnsRecordsResponse["responsedata"]["dnsrecords"]
-
-                for item in dnsRecords:
-                    if item["hostname"] != SUBDOMAIN:
-                        continue
-
-                    if item["type"] == "A":
-                        updateDnsRecordsRequest = {
-                            "action": "updateDnsRecords",
-                            "param": {
-                                "domainname": DOMAIN,
-                                "customernumber": CUSTOMER_ID,
-                                "apikey": API_KEY,
-                                "apisessionid": apiSessionId,
-                                "dnsrecordset": {
-                                    "dnsrecords": [
-                                        {
-                                            "id": item["id"],
-                                            "hostname": SUBDOMAIN,
-                                            "type": item["type"],
-                                            "destination": IPv4,
-                                        }
-                                    ]
-                                },
-                            },
-                        }
-
-                        updateDnsRecordsResponse = requests.post(
-                            url=NETCUP_API, json=updateDnsRecordsRequest
-                        ).json()
-                        if updateDnsRecordsResponse.get("status") != "success":
-                            logger.error(
-                                "Could not update A record for %s.%s", SUBDOMAIN, DOMAIN
-                            )
-                            updated_records.append(
-                                {
-                                    "domain": DOMAIN,
-                                    "subdomain": SUBDOMAIN,
-                                    "record_type": "A",
-                                    "destination": f"{RED}UPDATE FAILED{RESET}",
-                                }
-                            )
-                        else:
-                            updated_records.append(
-                                {
-                                    "domain": DOMAIN,
-                                    "subdomain": SUBDOMAIN,
-                                    "record_type": "A",
-                                    "destination": IPv4,
-                                }
-                            )
-                        progress_bar.update(1)
-
-                    if item["type"] == "AAAA":
-                        updateDnsRecordsRequest = {
-                            "action": "updateDnsRecords",
-                            "param": {
-                                "domainname": DOMAIN,
-                                "customernumber": CUSTOMER_ID,
-                                "apikey": API_KEY,
-                                "apisessionid": apiSessionId,
-                                "dnsrecordset": {
-                                    "dnsrecords": [
-                                        {
-                                            "id": item["id"],
-                                            "hostname": SUBDOMAIN,
-                                            "type": item["type"],
-                                            "destination": IPv6,
-                                        }
-                                    ]
-                                },
-                            },
-                        }
-
-                        updateDnsRecordsResponse = requests.post(
-                            url=NETCUP_API, json=updateDnsRecordsRequest
-                        ).json()
-                        if updateDnsRecordsResponse.get("status") != "success":
-                            logger.error(
-                                "Could not update AAAA record for %s.%s",
-                                SUBDOMAIN,
-                                DOMAIN,
-                            )
-                            updated_records.append(
-                                {
-                                    "domain": DOMAIN,
-                                    "subdomain": SUBDOMAIN,
-                                    "record_type": "AAAA",
-                                    "destination": f"{RED}UPDATE FAILED{RESET}",
-                                }
-                            )
-                        else:
-                            updated_records.append(
-                                {
-                                    "domain": DOMAIN,
-                                    "subdomain": SUBDOMAIN,
-                                    "record_type": "AAAA",
-                                    "destination": IPv6,
-                                }
-                            )
-                        progress_bar.update(1)
-
-            finally:
-                logoutRequest = {
-                    "action": "logout",
-                    "param": {
-                        "customernumber": CUSTOMER_ID,
-                        "apikey": API_KEY,
-                        "apisessionid": apiSessionId,
-                    },
-                }
-                requests.post(url=NETCUP_API, json=logoutRequest)
-
-        except Exception as ex:
-            logger.error("Unexpected error processing %s: %s", domain, ex)
-            progress_bar.update(2)
-            continue
+    else:
+        logger.info("Running sequentially (PARALLEL_PROCESSES <= 1).")
+        for domain in domains_list:
+            res, count = process_subdomain(domain, settings, IPv4, IPv6)
+            updated_records.extend(res)
+            progress_bar.update(count)
 
     progress_bar.close()
 
