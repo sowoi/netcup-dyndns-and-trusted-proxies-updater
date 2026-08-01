@@ -9,6 +9,7 @@ from src.netcup_dyndns import (
     main,
     parse_cli_args,
     read_project_version,
+    resolve_runtime_paths,
 )
 
 # --- parse_cli_args / build_arg_parser -------------------------------------
@@ -25,6 +26,9 @@ def test_parse_cli_args_defaults_are_none_when_no_args_given():
     assert args.parallel_processes is None
     assert args.ip_mode is None
     assert args.disable_nextcloud_nginx is None
+    assert args.settings_file is None
+    assert args.cache_dir is None
+    assert args.show_paths is False
 
 
 def test_parse_cli_args_parses_all_options():
@@ -39,6 +43,8 @@ def test_parse_cli_args_parses_all_options():
             "--parallel-processes", "4",
             "--ip-mode", "ipv4",
             "--disable-nextcloud-nginx",
+            "--settings-file", "~/config/netcup.json",
+            "--cache-dir", "~/cache/netcup",
         ]
     )
 
@@ -51,6 +57,8 @@ def test_parse_cli_args_parses_all_options():
     assert args.parallel_processes == 4
     assert args.ip_mode == "ipv4"
     assert args.disable_nextcloud_nginx is True
+    assert args.settings_file == "~/config/netcup.json"
+    assert args.cache_dir == "~/cache/netcup"
 
 
 def test_parse_cli_args_no_disable_nextcloud_nginx_sets_false():
@@ -81,6 +89,73 @@ def test_parse_cli_args_version_reads_pyproject_toml(capsys):
     assert capsys.readouterr().out.strip() == f"{read_project_version()} {REPOSITORY_URL}"
 
 
+def test_resolve_runtime_paths_expands_configured_paths(tmp_path):
+    settings_file = tmp_path / "settings.json"
+    cache_directory = tmp_path / "cache"
+
+    settings_path, cache_path = resolve_runtime_paths(
+        parse_cli_args(
+            ["--settings-file", str(settings_file), "--cache-dir", str(cache_directory)]
+        )
+    )
+
+    assert settings_path == settings_file.resolve()
+    assert cache_path == cache_directory.resolve()
+
+
+def test_main_show_paths_exits_without_creating_files(tmp_path, capsys):
+    settings_file = tmp_path / "settings.json"
+    cache_directory = tmp_path / "cache"
+
+    main(
+        [
+            "--settings-file", str(settings_file),
+            "--cache-dir", str(cache_directory),
+            "--show-paths",
+        ]
+    )
+
+    assert capsys.readouterr().out.splitlines() == [
+        f"Settings file: {settings_file.resolve()}",
+        f"Cache directory: {cache_directory.resolve()}",
+    ]
+    assert not settings_file.exists()
+    assert not cache_directory.exists()
+
+
+def test_main_uses_configured_settings_and_cache_paths(tmp_path, mocker):
+    settings_file = tmp_path / "settings.json"
+    cache_directory = tmp_path / "cache"
+    create_settings_mock = mocker.patch(
+        "src.updateDynDns.create_settings_file_if_not_exists"
+    )
+    read_cached_ips_mock = mocker.patch(
+        "src.updateDynDns.read_cached_ips", return_value=(None, None)
+    )
+    mocker.patch("src.updateDynDns.write_cached_ips")
+    read_failed_domains_mock = mocker.patch(
+        "src.updateDynDns.read_failed_domains", return_value={}
+    )
+    mocker.patch("src.updateDynDns.write_failed_domains")
+    mocker.patch(
+        "builtins.open", mocker.mock_open(read_data=json.dumps(MOCK_SETTINGS))
+    )
+    mocker.patch("requests.get", side_effect=_mock_ip_get_responses(mocker))
+    mocker.patch("src.updateDynDns.nginx_trusted_proxies_configuration")
+    mocker.patch("src.updateDynDns.process_subdomain", return_value=([], 2))
+
+    main(
+        [
+            "--settings-file", str(settings_file),
+            "--cache-dir", str(cache_directory),
+        ]
+    )
+
+    create_settings_mock.assert_called_once_with(settings_file.resolve(), mocker.ANY)
+    read_cached_ips_mock.assert_called_once_with(cache_dir=cache_directory.resolve())
+    read_failed_domains_mock.assert_called_once_with(cache_dir=cache_directory.resolve())
+
+
 def test_build_arg_parser_returns_parser_with_expected_options():
     parser = build_arg_parser()
     option_strings = {
@@ -99,6 +174,9 @@ def test_build_arg_parser_returns_parser_with_expected_options():
         "--parallel-processes",
         "--ip-mode",
         "--disable-nextcloud-nginx",
+        "--settings-file",
+        "--cache-dir",
+        "--show-paths",
     }.issubset(option_strings)
 
 

@@ -276,6 +276,13 @@ CLI_ARGUMENT_TO_SETTINGS_KEY = {
 }
 
 
+def resolve_runtime_paths(args):
+    """Return the absolute settings-file and cache-directory paths for a run."""
+    settings_path = Path(args.settings_file or settings_file_path).expanduser().resolve()
+    cache_path = Path(args.cache_dir or cache_dir).expanduser().resolve()
+    return settings_path, cache_path
+
+
 def build_arg_parser():
     """Build the command-line argument parser.
 
@@ -297,6 +304,21 @@ def build_arg_parser():
         "--version",
         action="version",
         version=f"{read_project_version()}\n{REPOSITORY_URL}",
+    )
+    parser.add_argument(
+        "--settings-file",
+        metavar="PATH",
+        help="Path to the settings JSON file. Defaults to .settings.json.",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        metavar="PATH",
+        help="Directory for temporary IP and retry cache files. Defaults to .temp.",
+    )
+    parser.add_argument(
+        "--show-paths",
+        action="store_true",
+        help="Show the resolved settings-file and cache-directory paths, then exit.",
     )
     parser.add_argument(
         "--api-password",
@@ -662,12 +684,18 @@ def process_subdomain(domain_str, settings, IPv4, IPv6):
 
 def main(argv=None):
     args = parse_cli_args(argv if argv is not None else [])
+    active_settings_file, active_cache_dir = resolve_runtime_paths(args)
 
-    create_settings_file_if_not_exists(settings_file_path, default_settings)
-    cached_ipv4, cached_ipv6 = read_cached_ips()
-    failed_domains = read_failed_domains()
+    if args.show_paths:
+        print(f"Settings file: {active_settings_file}")
+        print(f"Cache directory: {active_cache_dir}")
+        return
 
-    with open(conf) as fp:
+    create_settings_file_if_not_exists(active_settings_file, default_settings)
+    cached_ipv4, cached_ipv6 = read_cached_ips(cache_dir=active_cache_dir)
+    failed_domains = read_failed_domains(cache_dir=active_cache_dir)
+
+    with open(active_settings_file) as fp:
         settings = json.load(fp)
         settings = apply_secret_overrides(settings)
         settings = apply_cli_overrides(settings, args)
@@ -704,7 +732,7 @@ def main(argv=None):
         sys.exit(0)
 
     if ip_changed:
-        write_cached_ips(IPv4, IPv6)
+        write_cached_ips(IPv4, IPv6, cache_dir=active_cache_dir)
     else:
         logger.info(
             "IP addresses have not changed, but %d previously failed subdomain(s) "
@@ -714,7 +742,7 @@ def main(argv=None):
         )
 
     try:
-        with open(conf) as fp:
+        with open(active_settings_file) as fp:
             settings = json.load(fp)
             settings = apply_secret_overrides(settings)
             settings = apply_cli_overrides(settings, args)
@@ -730,7 +758,7 @@ def main(argv=None):
                 logger.error("Key %s is missing in .settings.json file.", e)
                 sys.exit(1)
     except FileNotFoundError:
-        logger.error("%s file not found.", conf)
+        logger.error("%s file not found.", active_settings_file)
         sys.exit(1)
     except json.JSONDecodeError:
         logger.error(".settings.json is not a valid JSON document.")
@@ -826,7 +854,7 @@ def main(argv=None):
     failed_domains = {
         domain: count for domain, count in failed_domains.items() if domain in configured_domains
     }
-    write_failed_domains(failed_domains)
+    write_failed_domains(failed_domains, cache_dir=active_cache_dir)
 
     exhausted_domains = sorted(
         domain for domain, count in failed_domains.items() if count >= MAX_SUBDOMAIN_RETRIES
