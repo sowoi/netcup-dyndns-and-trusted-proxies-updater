@@ -1,6 +1,6 @@
 import requests
 
-from netcup_dyndns import (
+from src.netcup_dyndns import (
     DEFAULT_IP_MODE,
     DEFAULT_PARALLEL_PROCESSES,
     check_endpoint_reachable,

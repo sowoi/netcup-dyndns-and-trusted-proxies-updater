@@ -3,7 +3,7 @@ from unittest import mock
 
 import pytest
 
-from netcup_dyndns import validate_settings
+from src.netcup_dyndns import validate_settings
 
 
 def test_validate_settings(mocker):

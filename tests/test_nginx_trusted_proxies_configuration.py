@@ -1,4 +1,4 @@
-from netcup_dyndns import nginx_trusted_proxies_configuration
+from src.netcup_dyndns import nginx_trusted_proxies_configuration
 from unittest.mock import patch
 
 def test_nginx_trusted_proxies_configuration():

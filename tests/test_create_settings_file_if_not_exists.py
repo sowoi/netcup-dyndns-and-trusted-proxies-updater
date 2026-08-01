@@ -1,6 +1,6 @@
 import os
 import pytest
-from netcup_dyndns import create_settings_file_if_not_exists
+from src.netcup_dyndns import create_settings_file_if_not_exists
 
 
 @pytest.fixture

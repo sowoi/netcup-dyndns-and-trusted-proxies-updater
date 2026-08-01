@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from netcup_dyndns import (
+from src.netcup_dyndns import (
     apply_cli_overrides,
     build_arg_parser,
     main,

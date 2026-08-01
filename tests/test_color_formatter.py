@@ -1,6 +1,6 @@
 import logging
 
-from netcup_dyndns import ColorFormatter, TqdmLoggingHandler
+from src.netcup_dyndns import ColorFormatter, TqdmLoggingHandler
 
 
 def _format(level, message):
@@ -37,7 +37,7 @@ def test_info_messages_are_not_colored():
 
 def test_tqdm_logging_handler_writes_via_tqdm(mocker):
     """The handler must route messages through tqdm.write to avoid corrupting the bar."""
-    tqdm_write_mock = mocker.patch("netcup_dyndns.tqdm.write")
+    tqdm_write_mock = mocker.patch("src.updateDynDns.tqdm.write")
     handler = TqdmLoggingHandler()
     handler.setFormatter(logging.Formatter("%(message)s"))
     logger = logging.getLogger("test_tqdm_handler")

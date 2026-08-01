@@ -4,7 +4,12 @@ from importlib import import_module
 import sys
 
 
-main = import_module("src.netcup-dyndns").main
+_implementation = import_module("src.netcup-dyndns")
+main = _implementation.main
+
+
+def __getattr__(name):
+    return getattr(_implementation, name)
 
 
 def cli():

@@ -1,4 +1,4 @@
-from netcup_dyndns import (
+from src.netcup_dyndns import (
     apply_file_secret_overrides,
     apply_secret_overrides,
     default_settings,
