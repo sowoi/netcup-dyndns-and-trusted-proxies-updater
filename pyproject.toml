@@ -1,6 +1,6 @@
 [project]
 name = "netcup-dyndns-and-trusted-proxies-updater"
-version = "1.1.0"
+version = "1.2.0"
 description = "Netcup DynDns and Nexcloud Trusted Proxies Updater"
 authors = [{ name = "Massoud Ahmed" }]
 readme = "README.md"
