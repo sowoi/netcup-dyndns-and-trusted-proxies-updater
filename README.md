@@ -30,6 +30,36 @@ uv tool install netcup-dyndns-and-trusted-proxies-updater
 pip install netcup-dyndns-and-trusted-proxies-updater
 ```
 
+## Using an Installed Tool
+
+All three installation methods provide the `netcup-dyndns` command. Confirm the
+installed version and repository URL with:
+```
+netcup-dyndns --version
+```
+
+By default, the command creates `.settings.json` and `.temp` in the current
+working directory. First inspect the paths it will use:
+```
+netcup-dyndns --show-paths
+```
+
+Run it once to create the settings file, edit the generated file with your
+credentials and domains, then run the updater again:
+```
+netcup-dyndns
+```
+
+For a service, cron job, or any other setup where the current directory is not
+stable, specify absolute paths explicitly:
+```
+netcup-dyndns \
+  --settings-file /etc/netcup-dyndns/settings.json \
+  --cache-dir /var/lib/netcup-dyndns
+```
+Use the same `--settings-file` and `--cache-dir` values for every run. The
+cache directory stores the last observed IP addresses and retry state.
+
 You can also clone this repository to run it from source:
 ```
 git clone <repository-url>
@@ -79,6 +109,9 @@ netcup-dyndns --help
 options:
   -h, --help            show this help message and exit
   --version             show the version and repository URL, then exit
+  --settings-file PATH  path to the settings JSON file
+  --cache-dir PATH      directory for temporary IP and retry cache files
+  --show-paths          show the resolved settings-file and cache-directory paths, then exit
   --api-password API_PASSWORD
                         Netcup API password. Overrides API_PASSWORD.
   --api-key API_KEY     Netcup API key. Overrides API_KEY.

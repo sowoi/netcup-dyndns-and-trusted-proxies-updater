@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -102,7 +103,9 @@ def test_main_successful_dns_update(mocker):
 
     main()
 
-    write_cached_ips_mock.assert_called_once_with("1.2.3.4", "::1")
+    write_cached_ips_mock.assert_called_once_with(
+        "1.2.3.4", "::1", cache_dir=Path(".temp").resolve()
+    )
     nginx_mock.assert_called_once_with("/var/www/nextcloud", "0", "::1")
     assert post_mock.call_count == 5
 
@@ -290,7 +293,9 @@ def test_main_continues_without_ipv6_on_request_exception(mocker):
 
     main()
 
-    write_cached_ips_mock.assert_called_once_with("1.2.3.4", None)
+    write_cached_ips_mock.assert_called_once_with(
+        "1.2.3.4", None, cache_dir=Path(".temp").resolve()
+    )
     nginx_mock.assert_called_once_with("/var/www/nextcloud", "0", None)
 
 
@@ -349,7 +354,9 @@ def test_main_updates_multiple_domains(mocker):
 
     main()
 
-    write_cached_ips_mock.assert_called_once_with("1.2.3.4", "::1")
+    write_cached_ips_mock.assert_called_once_with(
+        "1.2.3.4", "::1", cache_dir=Path(".temp").resolve()
+    )
     assert post_mock.call_count == 8
 
 
