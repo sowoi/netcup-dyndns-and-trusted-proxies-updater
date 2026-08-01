@@ -17,7 +17,7 @@ Repository = "https://github.com/sowoi/netcup-dyndns-and-trusted-proxies-updater
 netcup-dyndns = "src.netcup_dyndns:cli"
 
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools>=83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
