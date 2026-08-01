@@ -1,9 +1,11 @@
 import argparse
+from importlib.metadata import version
 import logging
 import os
 import sys
 import requests
 import json
+import tomllib
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -61,6 +63,8 @@ DEFAULT_IP_MODE = "both"
 VALID_IP_MODES = {"ipv4", "ipv6", "both"}
 MAX_SUBDOMAIN_RETRIES = 5
 failed_domains_cache_file = "failed_domains.json"
+PROJECT_FILE = Path(__file__).resolve().parent.parent / "pyproject.toml"
+REPOSITORY_URL = "https://github.com/sowoi/netcup-dyndns-and-trusted-proxies-updater"
 
 default_settings = {
     "API_PASSWORD": "",
@@ -73,6 +77,14 @@ default_settings = {
     "IP_MODE": DEFAULT_IP_MODE,
     "DISABLE_NEXTCLOUD_NGINX": False,
 }
+
+
+def read_project_version(project_file=PROJECT_FILE):
+    """Return the project version declared in pyproject.toml."""
+    if project_file.exists():
+        with project_file.open("rb") as file:
+            return tomllib.load(file)["project"]["version"]
+    return version("netcup-dyndns-and-trusted-proxies-updater")
 
 
 def create_settings_file_if_not_exists(file_path, default_content):
@@ -271,13 +283,18 @@ def build_arg_parser():
     last. Running with -h/--help prints all available options and exits.
     """
     parser = argparse.ArgumentParser(
-        prog="updateDynDns",
+        prog="netcup-dyndns",
         description=(
             "Updates Netcup DNS A/AAAA records with the host's current public IP "
             "address(es) and, optionally, the Nextcloud trusted_proxies "
             "configuration. Any option given here overrides the corresponding "
             "value from .settings.json (and any secret provider)."
         ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"{read_project_version()}\n{REPOSITORY_URL}",
     )
     parser.add_argument(
         "--api-password",

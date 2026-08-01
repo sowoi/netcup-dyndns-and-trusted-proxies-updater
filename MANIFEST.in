@@ -1,0 +1,4 @@
+prune Docker
+prune tests
+recursive-exclude Docker *
+recursive-exclude tests *

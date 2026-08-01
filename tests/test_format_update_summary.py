@@ -1,4 +1,4 @@
-from src.updateDynDns import format_update_summary
+from netcup_dyndns import format_update_summary
 
 
 def test_format_update_summary_no_records():

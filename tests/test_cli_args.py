@@ -2,11 +2,13 @@ import json
 
 import pytest
 
-from src.updateDynDns import (
+from netcup_dyndns import (
     apply_cli_overrides,
     build_arg_parser,
     main,
     parse_cli_args,
+    read_project_version,
+    REPOSITORY_URL,
 )
 
 
@@ -70,6 +72,14 @@ def test_parse_cli_args_help_exits_with_zero(capsys):
     assert "--api-password" in captured.out
     assert "--ip-mode" in captured.out
     assert "--disable-nextcloud-nginx" in captured.out
+
+
+def test_parse_cli_args_version_reads_pyproject_toml(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        parse_cli_args(["--version"])
+
+    assert exc_info.value.code == 0
+    assert capsys.readouterr().out.strip() == f"{read_project_version()} {REPOSITORY_URL}"
 
 
 def test_build_arg_parser_returns_parser_with_expected_options():

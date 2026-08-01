@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from src.updateDynDns import main
+from netcup_dyndns import main
 
 
 MOCK_SETTINGS = {

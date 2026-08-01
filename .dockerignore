@@ -1,0 +1,9 @@
+.git
+.github
+.idea
+.pytest_cache
+.ruff_cache
+.temp
+.venv
+Docker/docker-compose.yml
+tests
