@@ -4,7 +4,6 @@ import pytest
 
 from src.netcup_dyndns import main
 
-
 MOCK_SETTINGS = {
     "API_PASSWORD": "password",
     "API_KEY": "api_key",

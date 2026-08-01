@@ -1,10 +1,9 @@
 from pathlib import Path
 
-
 import pytest
 import requests
 
-from src.netcup_dyndns import write_cached_ips, read_cached_ips
+from src.netcup_dyndns import read_cached_ips, write_cached_ips
 
 
 @pytest.fixture

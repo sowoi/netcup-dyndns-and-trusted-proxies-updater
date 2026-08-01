@@ -3,14 +3,13 @@ import json
 import pytest
 
 from src.netcup_dyndns import (
+    REPOSITORY_URL,
     apply_cli_overrides,
     build_arg_parser,
     main,
     parse_cli_args,
     read_project_version,
-    REPOSITORY_URL,
 )
-
 
 # --- parse_cli_args / build_arg_parser -------------------------------------
 

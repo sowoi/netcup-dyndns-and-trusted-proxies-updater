@@ -1,8 +1,7 @@
 """Import adapter for the hyphenated executable script."""
 
-from importlib import import_module
 import sys
-
+from importlib import import_module
 
 _implementation = import_module("src.netcup-dyndns")
 main = _implementation.main

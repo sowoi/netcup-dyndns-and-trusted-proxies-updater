@@ -5,7 +5,6 @@ from src.netcup_dyndns import (
     fetch_openbao_secrets,
 )
 
-
 # --- fetch_openbao_secrets -------------------------------------------------
 
 

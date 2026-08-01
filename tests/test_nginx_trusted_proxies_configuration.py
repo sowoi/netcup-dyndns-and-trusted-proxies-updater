@@ -1,5 +1,7 @@
-from src.netcup_dyndns import nginx_trusted_proxies_configuration
 from unittest.mock import patch
+
+from src.netcup_dyndns import nginx_trusted_proxies_configuration
+
 
 def test_nginx_trusted_proxies_configuration():
     nextcloud_path = "/var/www/nextcloud"

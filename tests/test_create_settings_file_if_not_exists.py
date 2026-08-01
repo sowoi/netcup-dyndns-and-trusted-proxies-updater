@@ -1,5 +1,7 @@
 import os
+
 import pytest
+
 from src.netcup_dyndns import create_settings_file_if_not_exists
 
 

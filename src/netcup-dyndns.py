@@ -1,15 +1,17 @@
+# ruff: noqa: N999
+
 import argparse
-from importlib.metadata import version
+import json
 import logging
 import os
-import sys
-import requests
-import json
-import tomllib
 import subprocess
+import sys
+import tomllib
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from importlib.metadata import version
 from pathlib import Path
 
+import requests
 from tqdm import tqdm
 
 
@@ -20,7 +22,7 @@ class TqdmLoggingHandler(logging.Handler):
         try:
             msg = self.format(record)
             tqdm.write(msg)
-        except Exception:
+        except (OSError, TypeError, ValueError):
             self.handleError(record)
 
 
@@ -521,7 +523,7 @@ def process_subdomain(domain_str, settings, IPv4, IPv6):
 
     try:
         loginResponse = requests.post(url=NETCUP_API, json=loginRequest).json()
-    except Exception as e:
+    except requests.RequestException as e:
         logger.error("HTTP Error during login for %s: %s", domain_str, e)
         return [{"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A/AAAA",
                  "destination": f"{RED}LOGIN FAILED{RESET}"}], 2
@@ -588,7 +590,7 @@ def process_subdomain(domain_str, settings, IPv4, IPv6):
                     else:
                         results.append(
                             {"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A", "destination": IPv4})
-                except Exception as e:
+                except requests.RequestException as e:
                     logger.error("Error updating A record for %s.%s: %s", SUBDOMAIN, DOMAIN, e)
                     results.append({"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A",
                                     "destination": f"{RED}HTTP ERROR{RESET}"})
@@ -623,7 +625,7 @@ def process_subdomain(domain_str, settings, IPv4, IPv6):
                     else:
                         results.append(
                             {"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "AAAA", "destination": IPv6})
-                except Exception as e:
+                except requests.RequestException as e:
                     logger.error("Error updating AAAA record for %s.%s: %s", SUBDOMAIN, DOMAIN, e)
                     results.append({"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "AAAA",
                                     "destination": f"{RED}HTTP ERROR{RESET}"})
@@ -639,7 +641,7 @@ def process_subdomain(domain_str, settings, IPv4, IPv6):
 
         return results, 2
 
-    except Exception as ex:
+    except (KeyError, TypeError, requests.RequestException) as ex:
         logger.error("Unexpected error processing %s: %s", domain_str, ex)
         return [{"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A/AAAA",
                  "destination": f"{RED}UNEXPECTED ERROR{RESET}"}], 2
@@ -654,8 +656,8 @@ def process_subdomain(domain_str, settings, IPv4, IPv6):
         }
         try:
             requests.post(url=NETCUP_API, json=logoutRequest)
-        except Exception:
-            pass
+        except requests.RequestException as exc:
+            logger.debug("Failed to log out from netcup API: %s", exc)
 
 
 def main(argv=None):
@@ -788,7 +790,7 @@ def main(argv=None):
                     res, count = future.result()
                     updated_records.extend(res)
                     domain_had_error[domain] = any(RED_COLOR in r["destination"] for r in res)
-                except Exception as exc:
+                except (KeyError, TypeError, requests.RequestException) as exc:
                     logger.error("%r generated an exception: %s", domain, exc)
                     # Falls der ganze Thread crasht, fügen wir einen Fehlereintrag hinzu
                     updated_records.append({
