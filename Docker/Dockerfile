@@ -18,7 +18,7 @@ COPY pyproject.toml uv.lock ./
 
 # Install only the runtime dependency set (no dev tools such as pytest/ruff),
 # and skip installing the project itself since it has no build backend and is
-# only ever executed in place as "python -m src.updateDynDns".
+# only ever executed in place as "python src/netcup-dyndns.py".
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY src ./src
@@ -37,7 +37,7 @@ RUN groupadd --system app \
 # the builder stage.
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src ./src
-COPY docker-entrypoint.sh ./docker-entrypoint.sh
+COPY Docker/docker-entrypoint.sh ./docker-entrypoint.sh
 
 RUN chmod +x ./docker-entrypoint.sh \
     && mkdir -p /app/.temp \

@@ -3,7 +3,7 @@ from unittest import mock
 
 import pytest
 
-from src.updateDynDns import validate_settings
+from src.netcup_dyndns import validate_settings
 
 
 def test_validate_settings(mocker):
@@ -18,11 +18,13 @@ def test_validate_settings(mocker):
 
     mock_open = mock.mock_open(read_data=json.dumps(mock_settings))
 
-    with mock.patch("builtins.open", mock_open):
-        with mock.patch("json.load", return_value=mock_settings):
-            with open("fake_path") as fp:
-                settings = json.load(fp)
-                validate_settings(settings)
+    with (
+        mock.patch("builtins.open", mock_open),
+        mock.patch("json.load", return_value=mock_settings),
+        open("fake_path") as fp,
+    ):
+        settings = json.load(fp)
+        validate_settings(settings)
 
 
 def test_validate_valueerror_settings(mocker):
@@ -36,21 +38,25 @@ def test_validate_valueerror_settings(mocker):
     }
 
     mock_open = mock.mock_open(read_data=json.dumps(mock_settings))
-    with pytest.raises(ValueError):
-        with mock.patch("builtins.open", mock_open):
-            with mock.patch("json.load", return_value=mock_settings):
-                with open("fake_path") as fp:
-                    settings = json.load(fp)
-                    validate_settings(settings)
+    with (
+        pytest.raises(ValueError),
+        mock.patch("builtins.open", mock_open),
+        mock.patch("json.load", return_value=mock_settings),
+        open("fake_path") as fp,
+    ):
+        settings = json.load(fp)
+        validate_settings(settings)
 
 
 def test_validate_keyerror_settings(mocker):
     mock_settings = {"NEXTCLOUD_PATH": "/var/www/nextcloud", "TRUSTED_PROXIES_POS": "3"}
 
     mock_open = mock.mock_open(read_data=json.dumps(mock_settings))
-    with pytest.raises(KeyError):
-        with mock.patch("builtins.open", mock_open):
-            with mock.patch("json.load", return_value=mock_settings):
-                with open("fake_path") as fp:
-                    settings = json.load(fp)
-                    validate_settings(settings)
+    with (
+        pytest.raises(KeyError),
+        mock.patch("builtins.open", mock_open),
+        mock.patch("json.load", return_value=mock_settings),
+        open("fake_path") as fp,
+    ):
+        settings = json.load(fp)
+        validate_settings(settings)

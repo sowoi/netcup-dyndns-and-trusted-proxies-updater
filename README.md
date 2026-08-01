@@ -19,18 +19,22 @@ The script checks the current IPv4/IPv6 address of the host and updates the corr
 Additionally, it updates the Trusted Proxies configuration in Nextcloud via the OCC CLI.
 
 ## Prerequisites
-This script needs [uv](https://github.com/astral-sh/uv).
+This script needs Python 3.13 or newer.
 
 ## Installation
 
-1. Clone this repository to your local machine:
+Install the PyPI project with your preferred tool:
 ```
-git clone <repository-url>
+pipx install netcup-dyndns-and-trusted-proxies-updater
+uv tool install netcup-dyndns-and-trusted-proxies-updater
+pip install netcup-dyndns-and-trusted-proxies-updater
 ```
 
-2. Run the script using the uv command:
+You can also clone this repository to run it from source:
 ```
-uv run src/updateDynDns.py
+git clone <repository-url>
+cd netcup-dyndns-and-trusted-proxies-updater
+uv run src/netcup-dyndns.py
 ```
 The first run will create a settings.json file and a temp folder in your project directory.
 3. Configure the settings.json file with the following parameters:
@@ -68,12 +72,13 @@ one-off overrides or wiring the script into other tooling without editing the se
 file. Run with `--help` to see all available options:
 
 ```
-uv run src/updateDynDns.py --help
+netcup-dyndns --help
 ```
 
 ```
 options:
   -h, --help            show this help message and exit
+  --version             show the version and repository URL, then exit
   --api-password API_PASSWORD
                         Netcup API password. Overrides API_PASSWORD.
   --api-key API_KEY     Netcup API key. Overrides API_KEY.
@@ -102,13 +107,13 @@ options:
 
 Example, overriding just the domain for a single run without touching `.settings.json`:
 ```
-uv run src/updateDynDns.py --netcup-domain example.com,example.net
+netcup-dyndns --netcup-domain example.com,example.net
 ```
 
 ## Docker Installation (alternative)
 
 Instead of installing `uv` and Python locally, you can run this project as a lightweight
-Docker container. The provided `Dockerfile` uses a multi-stage build: `uv` and dependency
+Docker container. The provided `Docker/Dockerfile` uses a multi-stage build: `uv` and dependency
 resolution happen only in a throw-away build stage, and the final runtime image is based
 on `python:3.13-slim` with just the resolved virtual environment and application code —
 no `uv`, compilers, or other build tools are present in the image you actually run.
@@ -121,17 +126,17 @@ no `uv`, compilers, or other build tools are present in the image you actually r
 
 2. Build and start the container with Docker Compose:
    ```
-   docker compose up -d --build
+   docker compose -f Docker/docker-compose.yml up -d --build
    ```
    This mounts `.settings.json` read-write into the container and persists the cached IP
    addresses in a named volume (`dyndns-cache`) across restarts. By default, the container
    checks for IP changes every `UPDATE_INTERVAL_SECONDS` (300s/5 minutes); adjust this in
-   `docker-compose.yml` as needed.
+   `Docker/docker-compose.yml` as needed.
 
    Alternatively, to trigger a single run (e.g. from a host cron job or systemd timer)
    instead of running continuously:
    ```
-   docker compose run --rm -e RUN_ONCE=true netcup-dyndns-updater
+   docker compose -f Docker/docker-compose.yml run --rm -e RUN_ONCE=true netcup-dyndns-updater
    ```
 
 3. **Nextcloud/Nginx integration caveat:** `nginx_trusted_proxies_configuration` shells out

@@ -1,8 +1,8 @@
 services:
   netcup-dyndns-updater:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: Docker/Dockerfile
     image: netcup-dyndns-and-trusted-proxies-updater:latest
     container_name: netcup-dyndns-updater
     restart: unless-stopped
@@ -25,7 +25,7 @@ services:
     volumes:
       # Non-secret configuration; required values not overridden by a
       # secret provider must still be filled in here (see README.md).
-      - ./.settings.json:/app/.settings.json
+      - ../.settings.json:/app/.settings.json
       # Persists the last-seen IP addresses between container restarts.
       - dyndns-cache:/app/.temp
     # Uncomment to mount OpenBAO/Docker secrets referenced above:

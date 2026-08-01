@@ -1,6 +1,6 @@
 import logging
 
-from src.updateDynDns import ColorFormatter, TqdmLoggingHandler
+from src.netcup_dyndns import ColorFormatter, TqdmLoggingHandler
 
 
 def _format(level, message):

@@ -17,16 +17,16 @@ INTERVAL="${UPDATE_INTERVAL_SECONDS:-300}"
 for arg in "$@"; do
     case "$arg" in
         -h|--help)
-            exec python -m src.updateDynDns "$@"
+            exec python src/netcup-dyndns.py "$@"
             ;;
     esac
 done
 
 if [ "${RUN_ONCE:-false}" = "true" ]; then
-    exec python -m src.updateDynDns "$@"
+    exec python src/netcup-dyndns.py "$@"
 fi
 
 while true; do
-    python -m src.updateDynDns "$@" || echo "Update run failed; will retry in ${INTERVAL}s." >&2
+    python src/netcup-dyndns.py "$@" || echo "Update run failed; will retry in ${INTERVAL}s." >&2
     sleep "$INTERVAL"
 done
