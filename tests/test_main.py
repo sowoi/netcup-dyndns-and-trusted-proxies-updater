@@ -58,6 +58,26 @@ def test_main_exits_early_when_ips_unchanged(mocker):
     post_mock.assert_not_called()
 
 
+def test_main_force_updates_despite_unchanged_cached_ips(mocker):
+    """--force should bypass the cached-IP check and update every domain."""
+    write_cached_ips_mock = _common_mocks(
+        mocker, cached_ipv4="1.2.3.4", cached_ipv6="::1"
+    )
+    mocker.patch("requests.get", side_effect=_mock_ip_get_responses(mocker))
+    mocker.patch("src.updateDynDns.nginx_trusted_proxies_configuration")
+    process_mock = mocker.patch(
+        "src.updateDynDns.process_subdomain", return_value=([], 2)
+    )
+
+    main(["--force"])
+
+    write_cached_ips_mock.assert_called_once_with(
+        "1.2.3.4", "::1", cache_dir=Path(".temp").resolve()
+    )
+    process_mock.assert_called_once()
+    assert process_mock.call_args.args[0] == "sub.example.com"
+
+
 def test_main_successful_dns_update(mocker):
     """Full happy-path run: login, fetch records, update A + AAAA records, logout."""
     write_cached_ips_mock = _common_mocks(mocker, cached_ipv4=None, cached_ipv6=None)

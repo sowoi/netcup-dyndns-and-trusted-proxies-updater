@@ -112,6 +112,8 @@ options:
   --settings-file PATH  path to the settings JSON file
   --cache-dir PATH      directory for temporary IP and retry cache files
   --show-paths          show the resolved settings-file and cache-directory paths, then exit
+  --force               Force a DNS update of all domains, ignoring the cached
+                        IPv4/IPv6 addresses.
   --api-password API_PASSWORD
                         Netcup API password. Overrides API_PASSWORD.
   --api-key API_KEY     Netcup API key. Overrides API_KEY.

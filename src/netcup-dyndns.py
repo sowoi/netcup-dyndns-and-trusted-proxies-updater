@@ -321,6 +321,11 @@ def build_arg_parser():
         help="Show the resolved settings-file and cache-directory paths, then exit.",
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force a DNS update of all domains, ignoring the cached IPv4/IPv6 addresses.",
+    )
+    parser.add_argument(
         "--api-password",
         dest="api_password",
         default=None,
@@ -712,6 +717,10 @@ def main(argv=None):
         logger.warning("No IPv6 address found. IPv6 cache will not be written: %s", e)
 
     ip_changed = not (IPv4 == cached_ipv4 and IPv6 == cached_ipv6)
+    if args.force and not ip_changed:
+        logger.info("--force given: updating DNS records despite unchanged cached IP addresses.")
+    # --force is treated like a real IP change so every configured domain is updated.
+    ip_changed = ip_changed or args.force
     pending_retry_domains = {
         domain for domain, count in failed_domains.items() if count < MAX_SUBDOMAIN_RETRIES
     }

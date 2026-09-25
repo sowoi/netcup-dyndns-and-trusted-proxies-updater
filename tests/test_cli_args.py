@@ -29,6 +29,7 @@ def test_parse_cli_args_defaults_are_none_when_no_args_given():
     assert args.settings_file is None
     assert args.cache_dir is None
     assert args.show_paths is False
+    assert args.force is False
 
 
 def test_parse_cli_args_parses_all_options():
@@ -177,6 +178,7 @@ def test_build_arg_parser_returns_parser_with_expected_options():
         "--settings-file",
         "--cache-dir",
         "--show-paths",
+        "--force",
     }.issubset(option_strings)
 
 
