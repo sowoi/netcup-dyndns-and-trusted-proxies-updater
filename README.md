@@ -261,6 +261,10 @@ TRUSTED_PROXIES_POS specifies the position in the TrustedProxies configuration w
 
 ## Contributing
 
+When bumping the version in `pyproject.toml`, add a matching `## [x.y.z] - YYYY-MM-DD`
+section to [CHANGELOG.md](CHANGELOG.md). After the pull request is merged into `main`,
+that section is published as the notes of the GitHub release.
+
 To ensure proper code formatting, run the following command:
 ```
 uv run --dev ruff check
