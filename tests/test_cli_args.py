@@ -62,6 +62,11 @@ def test_parse_cli_args_parses_all_options():
     assert args.cache_dir == "~/cache/netcup"
 
 
+def test_parse_cli_args_force_sets_true():
+    args = parse_cli_args(["--force"])
+    assert args.force is True
+
+
 def test_parse_cli_args_no_disable_nextcloud_nginx_sets_false():
     args = parse_cli_args(["--no-disable-nextcloud-nginx"])
     assert args.disable_nextcloud_nginx is False
