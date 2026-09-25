@@ -15,6 +15,7 @@ When a pull request is merged into `main`, the section matching the version in
   without considering the cached IPv4/IPv6 addresses. This also retries domains
   that have exhausted their retry budget.
 - `CHANGELOG.md`, used as the source for GitHub release notes.
+- README section on updating via pipx, uv and pip.
 
 ### Changed
 - `uv.lock` is now tracked in the repository (required by the Docker build).
