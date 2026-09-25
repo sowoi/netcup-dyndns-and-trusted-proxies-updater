@@ -29,6 +29,7 @@ def test_parse_cli_args_defaults_are_none_when_no_args_given():
     assert args.settings_file is None
     assert args.cache_dir is None
     assert args.show_paths is False
+    assert args.force is False
 
 
 def test_parse_cli_args_parses_all_options():
@@ -59,6 +60,11 @@ def test_parse_cli_args_parses_all_options():
     assert args.disable_nextcloud_nginx is True
     assert args.settings_file == "~/config/netcup.json"
     assert args.cache_dir == "~/cache/netcup"
+
+
+def test_parse_cli_args_force_sets_true():
+    args = parse_cli_args(["--force"])
+    assert args.force is True
 
 
 def test_parse_cli_args_no_disable_nextcloud_nginx_sets_false():
@@ -177,6 +183,7 @@ def test_build_arg_parser_returns_parser_with_expected_options():
         "--settings-file",
         "--cache-dir",
         "--show-paths",
+        "--force",
     }.issubset(option_strings)
 
 

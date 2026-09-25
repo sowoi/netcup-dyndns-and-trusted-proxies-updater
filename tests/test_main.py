@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from src.netcup_dyndns import main
+from src.netcup_dyndns import MAX_SUBDOMAIN_RETRIES, main
 
 MOCK_SETTINGS = {
     "API_PASSWORD": "password",
@@ -56,6 +56,26 @@ def test_main_exits_early_when_ips_unchanged(mocker):
     assert exc_info.value.code == 0
     write_cached_ips_mock.assert_not_called()
     post_mock.assert_not_called()
+
+
+def test_main_force_updates_despite_unchanged_cached_ips(mocker):
+    """--force should bypass the cached-IP check and update every domain."""
+    write_cached_ips_mock = _common_mocks(
+        mocker, cached_ipv4="1.2.3.4", cached_ipv6="::1"
+    )
+    mocker.patch("requests.get", side_effect=_mock_ip_get_responses(mocker))
+    mocker.patch("src.updateDynDns.nginx_trusted_proxies_configuration")
+    process_mock = mocker.patch(
+        "src.updateDynDns.process_subdomain", return_value=([], 2)
+    )
+
+    main(["--force"])
+
+    write_cached_ips_mock.assert_called_once_with(
+        "1.2.3.4", "::1", cache_dir=Path(".temp").resolve()
+    )
+    process_mock.assert_called_once()
+    assert process_mock.call_args.args[0] == "sub.example.com"
 
 
 def test_main_successful_dns_update(mocker):
@@ -414,3 +434,102 @@ def test_main_exits_when_settings_key_missing_on_reload(mocker):
         main()
 
     assert exc_info.value.code == 1
+
+
+def _force_mocks(mocker, failed_domains=None):
+    write_cached_ips_mock = _common_mocks(
+        mocker, cached_ipv4="1.2.3.4", cached_ipv6="::1", failed_domains=failed_domains
+    )
+    mocker.patch("requests.get", side_effect=_mock_ip_get_responses(mocker))
+    nginx_mock = mocker.patch("src.updateDynDns.nginx_trusted_proxies_configuration")
+    process_mock = mocker.patch(
+        "src.updateDynDns.process_subdomain", return_value=([], 2)
+    )
+    return write_cached_ips_mock, nginx_mock, process_mock
+
+
+def test_main_without_force_does_not_update_when_ips_unchanged(mocker):
+    """Sanity check: the same setup without --force exits early."""
+    write_cached_ips_mock, nginx_mock, process_mock = _force_mocks(mocker)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([])
+
+    assert exc_info.value.code == 0
+    write_cached_ips_mock.assert_not_called()
+    nginx_mock.assert_not_called()
+    process_mock.assert_not_called()
+
+
+def test_main_force_updates_all_configured_domains(mocker):
+    """--force updates every configured domain, not only pending retries."""
+    _, _, process_mock = _force_mocks(mocker, failed_domains={"a.example.com": 1})
+
+    main(["--force", "--netcup-domain", "a.example.com, b.example.com"])
+
+    updated = sorted(call.args[0] for call in process_mock.call_args_list)
+    assert updated == ["a.example.com", "b.example.com"]
+
+
+def test_main_force_retries_domains_that_exhausted_their_retries(mocker):
+    """--force also updates domains that have exhausted their retry budget."""
+    _, _, process_mock = _force_mocks(
+        mocker, failed_domains={"sub.example.com": MAX_SUBDOMAIN_RETRIES}
+    )
+    write_failed_domains_mock = mocker.patch("src.updateDynDns.write_failed_domains")
+
+    main(["--force"])
+
+    process_mock.assert_called_once()
+    assert process_mock.call_args.args[0] == "sub.example.com"
+    # The domain succeeded, so its failure counter is cleared.
+    assert write_failed_domains_mock.call_args.args[0] == {}
+
+
+def test_main_force_runs_nextcloud_nginx_configuration(mocker):
+    """--force runs the trusted-proxies configuration with the current IPv6."""
+    _, nginx_mock, _ = _force_mocks(mocker)
+
+    main(["--force"])
+
+    nginx_mock.assert_called_once_with("/var/www/nextcloud", "0", "::1")
+
+
+def test_main_force_respects_disable_nextcloud_nginx(mocker):
+    """--force does not re-enable disabled Nextcloud/Nginx tasks."""
+    _, nginx_mock, process_mock = _force_mocks(mocker)
+
+    main(["--force", "--disable-nextcloud-nginx"])
+
+    nginx_mock.assert_not_called()
+    process_mock.assert_called_once()
+
+
+def test_main_force_logs_reason_when_ips_unchanged(mocker, caplog):
+    """--force logs that it is updating despite unchanged cached IPs."""
+    _force_mocks(mocker)
+
+    with caplog.at_level("INFO"):
+        main(["--force"])
+
+    assert "--force given" in caplog.text
+    assert "No update necessary" not in caplog.text
+
+
+def test_main_force_with_changed_ips_does_not_log_force_message(mocker, caplog):
+    """When IPs really changed, --force behaves like a normal update."""
+    write_cached_ips_mock = _common_mocks(
+        mocker, cached_ipv4="9.9.9.9", cached_ipv6="::9"
+    )
+    mocker.patch("requests.get", side_effect=_mock_ip_get_responses(mocker))
+    mocker.patch("src.updateDynDns.nginx_trusted_proxies_configuration")
+    process_mock = mocker.patch(
+        "src.updateDynDns.process_subdomain", return_value=([], 2)
+    )
+
+    with caplog.at_level("INFO"):
+        main(["--force"])
+
+    assert "--force given" not in caplog.text
+    write_cached_ips_mock.assert_called_once()
+    process_mock.assert_called_once()
