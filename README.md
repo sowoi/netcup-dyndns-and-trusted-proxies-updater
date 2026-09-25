@@ -3,6 +3,7 @@
 * [netcup-dyndns-and-trusted-proxies-updater](#netcup-dyndns-and-trusted-proxies-updater)
   * [Prerequisites](#prerequisites)
   * [Installation](#installation)
+  * [Updating](#updating)
   * [Command-Line Arguments](#command-line-arguments)
   * [Docker Installation (alternative)](#docker-installation-alternative)
   * [Providing Secrets at Runtime](#providing-secrets-at-runtime)
@@ -28,6 +29,32 @@ Install the PyPI project with your preferred tool:
 pipx install netcup-dyndns-and-trusted-proxies-updater
 uv tool install netcup-dyndns-and-trusted-proxies-updater
 pip install netcup-dyndns-and-trusted-proxies-updater
+```
+
+## Updating
+
+Update to the latest release with the same tool you used for the installation:
+```
+pipx upgrade netcup-dyndns-and-trusted-proxies-updater
+uv tool upgrade netcup-dyndns-and-trusted-proxies-updater
+pip install --upgrade netcup-dyndns-and-trusted-proxies-updater
+```
+
+To install a specific version instead, for example to roll back:
+```
+pipx install --force netcup-dyndns-and-trusted-proxies-updater==1.3.0
+uv tool install --force netcup-dyndns-and-trusted-proxies-updater==1.3.0
+pip install netcup-dyndns-and-trusted-proxies-updater==1.3.0
+```
+
+Confirm the installed version afterwards with `netcup-dyndns --version`. Updating
+does not touch your settings file or cache directory. See [CHANGELOG.md](CHANGELOG.md)
+for the changes in each release.
+
+If you run the script from a cloned repository, update it with:
+```
+git pull
+uv sync
 ```
 
 ## Using an Installed Tool
