@@ -34,6 +34,8 @@ def _common_mocks(mocker, cached_ipv4=None, cached_ipv6=None, failed_domains=Non
         return_value=dict(failed_domains) if failed_domains else {},
     )
     mocker.patch("src.updateDynDns.write_failed_domains")
+    mocker.patch("src.updateDynDns.read_rate_limit_state", return_value={})
+    mocker.patch("src.updateDynDns.write_rate_limit_state")
     mocker.patch(
         "builtins.open", mocker.mock_open(read_data=json.dumps(MOCK_SETTINGS))
     )

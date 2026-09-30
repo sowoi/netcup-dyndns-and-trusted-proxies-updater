@@ -7,6 +7,7 @@
   * [Command-Line Arguments](#command-line-arguments)
   * [Docker Installation (alternative)](#docker-installation-alternative)
   * [Providing Secrets at Runtime](#providing-secrets-at-runtime)
+  * [Login Limits and ntfy Notifications](#login-limits-and-ntfy-notifications)
   * [Usage](#usage)
   * [Configuration](#configuration)
   * [Contributing](#contributing)
@@ -42,9 +43,9 @@ pip install --upgrade netcup-dyndns-and-trusted-proxies-updater
 
 To install a specific version instead, for example to roll back:
 ```
-pipx install --force netcup-dyndns-and-trusted-proxies-updater==1.3.0
-uv tool install --force netcup-dyndns-and-trusted-proxies-updater==1.3.0
-pip install netcup-dyndns-and-trusted-proxies-updater==1.3.0
+pipx install --force netcup-dyndns-and-trusted-proxies-updater==1.4.0
+uv tool install --force netcup-dyndns-and-trusted-proxies-updater==1.4.0
+pip install netcup-dyndns-and-trusted-proxies-updater==1.4.0
 ```
 
 Confirm the installed version afterwards with `netcup-dyndns --version`. Updating
@@ -85,7 +86,7 @@ netcup-dyndns \
   --cache-dir /var/lib/netcup-dyndns
 ```
 Use the same `--settings-file` and `--cache-dir` values for every run. The
-cache directory stores the last observed IP addresses and retry state.
+cache directory stores the last observed IP addresses, retry state and login backoff.
 
 You can also clone this repository to run it from source:
 ```
@@ -106,7 +107,11 @@ The first run will create a settings.json file and a temp folder in your project
     "TRUSTED_PROXIES_POS": "",
     "PARALLEL_PROCESSES": 1,
     "IP_MODE": "both",
-    "DISABLE_NEXTCLOUD_NGINX": false
+    "DISABLE_NEXTCLOUD_NGINX": false,
+    "RATE_LIMIT_BACKOFF_MINUTES": [10, 30, 60],
+    "NTFY_SERVER": "https://ntfy.sh",
+    "NTFY_TOPIC": "",
+    "NTFY_TOKEN": ""
 }
 ```
 
@@ -119,6 +124,13 @@ TRUSTED_PROXIES_POS: The position in the TrustedProxies configuration where the 
 PARALLEL_PROCESSES: Number of parallel threads for DNS updates (Default: 1 for sequential execution. Values > 1 enable the ThreadPoolExecutor).
 IP_MODE: Determines which IP types to update. Options are "both" (default), "ipv4", or "ipv6".
 DISABLE_NEXTCLOUD_NGINX: Set to true to disable all Nextcloud OCC and Nginx reload tasks. Useful if you only want to use the script as a pure DynDNS client (Default: false).
+RATE_LIMIT_BACKOFF_MINUTES: Minimum waiting times in minutes between login attempts after netcup refused a login because of too many logins (Default: [10, 30, 60]). See [Login Limits and ntfy Notifications](#login-limits-and-ntfy-notifications).
+NTFY_SERVER: The ntfy server used for notifications (Default: https://ntfy.sh).
+NTFY_TOPIC: The ntfy topic that receives a notification when the login is still refused after the last backoff step. Leave empty to disable notifications (Default: empty).
+NTFY_TOKEN: Optional ntfy access token for protected topics, sent as `Authorization: Bearer <token>` (Default: empty).
+
+Settings files created by an earlier version do not contain the `RATE_LIMIT_BACKOFF_MINUTES`
+and `NTFY_*` keys. The defaults apply until you add them.
 
 ## Command-Line Arguments
 
@@ -145,7 +157,7 @@ options:
                         Netcup API password. Overrides API_PASSWORD.
   --api-key API_KEY     Netcup API key. Overrides API_KEY.
   --customer-id CUSTOMER_ID
-                        N
+                        Netcup customer ID. Overrides CUSTOMER_ID.
   --netcup-domain NETCUP_DOMAIN
                         Comma-separated domain(s) to update, e.g.
                         'example.com,example.net'. Overrides NETCUP_DOMAIN.
@@ -165,6 +177,20 @@ options:
                         Disable the Nextcloud OCC / Nginx reload tasks (use
                         --no-disable-nextcloud-nginx to force-enable them).
                         Overrides DISABLE_NEXTCLOUD_NGINX.
+  --rate-limit-backoff-minutes MINUTES
+                        Comma-separated minimum waiting times in minutes
+                        between login attempts after netcup refused a login
+                        because of too many logins, e.g. '10,30,60'.
+                        Overrides RATE_LIMIT_BACKOFF_MINUTES.
+  --ntfy-server NTFY_SERVER
+                        ntfy server URL for notifications. Overrides
+                        NTFY_SERVER.
+  --ntfy-topic NTFY_TOPIC
+                        ntfy topic to notify; empty disables notifications.
+                        Overrides NTFY_TOPIC.
+  --ntfy-token NTFY_TOKEN
+                        ntfy access token for protected topics. Overrides
+                        NTFY_TOKEN.
 ```
 
 Example, overriding just the domain for a single run without touching `.settings.json`:
@@ -246,6 +272,47 @@ values, since they are applied last. Neither mechanism is required — you can c
 configure everything directly in `.settings.json`. Command-line arguments (see
 [Command-Line Arguments](#command-line-arguments)) are applied after both, and therefore
 always take precedence over secret provider values as well.
+
+## Login Limits and ntfy Notifications
+
+The netcup API blocks logins for a while when there have been too many of them. The
+script recognizes such a block when the login
+
+* fails with a refused connection (`Connection refused`),
+* is answered with HTTP status `429 Too Many Requests`, or
+* is rejected with a netcup error message about too many logins or a reached limit.
+
+In that case, the script logs a `Connection Refused` error, stops logging in for the
+remaining domains of the run, and waits before the next attempt. With the default
+`RATE_LIMIT_BACKOFF_MINUTES` of `[10, 30, 60]`:
+
+| Refused login | Next attempt no sooner than |
+|---------------|-----------------------------|
+| 1st           | 10 minutes later            |
+| 2nd           | 30 minutes later            |
+| 3rd           | 60 minutes later            |
+| 4th and later | 60 minutes later, and a ntfy notification is sent after the 4th |
+
+Runs that start before the next attempt is due (for example from a cron job every five
+minutes or the Docker loop) exit immediately without contacting any API. The waiting
+times are minimums: the attempt happens on the first run after the waiting time has
+passed. Once a login succeeds again, every configured domain is updated, the backoff is
+reset, and, if a notification was sent, a second notification reports that logins work
+again. Refused logins do not count against the per-domain retry budget.
+
+Notifications are sent only if `NTFY_TOPIC` is set. To use them:
+
+1. Pick a hard-to-guess topic name on [ntfy.sh](https://ntfy.sh) (or on your own ntfy
+   server) and subscribe to it in the ntfy app.
+2. Set `NTFY_TOPIC` in `.settings.json`. Set `NTFY_SERVER` for a self-hosted server and
+   `NTFY_TOKEN` if the topic requires authentication.
+
+`NTFY_TOKEN` can also be provided at runtime as described in
+[Providing Secrets at Runtime](#providing-secrets-at-runtime), e.g. via `NTFY_TOKEN_FILE`.
+
+The backoff state is stored in `rate_limit.json` in the cache directory. Running with
+`--force` attempts a login even while the backoff is active; deleting `rate_limit.json`
+resets the backoff completely.
 
 ## Usage
 

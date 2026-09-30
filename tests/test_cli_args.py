@@ -30,6 +30,10 @@ def test_parse_cli_args_defaults_are_none_when_no_args_given():
     assert args.cache_dir is None
     assert args.show_paths is False
     assert args.force is False
+    assert args.rate_limit_backoff_minutes is None
+    assert args.ntfy_server is None
+    assert args.ntfy_topic is None
+    assert args.ntfy_token is None
 
 
 def test_parse_cli_args_parses_all_options():
@@ -60,6 +64,34 @@ def test_parse_cli_args_parses_all_options():
     assert args.disable_nextcloud_nginx is True
     assert args.settings_file == "~/config/netcup.json"
     assert args.cache_dir == "~/cache/netcup"
+
+
+def test_parse_cli_args_parses_rate_limit_and_ntfy_options():
+    args = parse_cli_args(
+        [
+            "--rate-limit-backoff-minutes", "5,15,45",
+            "--ntfy-server", "https://ntfy.example.com",
+            "--ntfy-topic", "dyndns-alerts",
+            "--ntfy-token", "tk_secret",
+        ]
+    )
+
+    assert args.rate_limit_backoff_minutes == "5,15,45"
+    assert args.ntfy_server == "https://ntfy.example.com"
+    assert args.ntfy_topic == "dyndns-alerts"
+    assert args.ntfy_token == "tk_secret"
+
+
+def test_apply_cli_overrides_overrides_rate_limit_and_ntfy_settings():
+    settings = {"RATE_LIMIT_BACKOFF_MINUTES": [10, 30, 60], "NTFY_TOPIC": "old"}
+    args = parse_cli_args(
+        ["--rate-limit-backoff-minutes", "1,2", "--ntfy-topic", "new"]
+    )
+
+    result = apply_cli_overrides(settings, args)
+
+    assert result["RATE_LIMIT_BACKOFF_MINUTES"] == "1,2"
+    assert result["NTFY_TOPIC"] == "new"
 
 
 def test_parse_cli_args_force_sets_true():
@@ -184,6 +216,10 @@ def test_build_arg_parser_returns_parser_with_expected_options():
         "--cache-dir",
         "--show-paths",
         "--force",
+        "--rate-limit-backoff-minutes",
+        "--ntfy-server",
+        "--ntfy-topic",
+        "--ntfy-token",
     }.issubset(option_strings)
 
 

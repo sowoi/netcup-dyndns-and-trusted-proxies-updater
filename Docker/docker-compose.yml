@@ -22,11 +22,13 @@ services:
       # --- Optional: per-key Docker/Kubernetes secret files --------------
       # API_PASSWORD_FILE: /run/secrets/api_password
       # API_KEY_FILE: /run/secrets/api_key
+      # NTFY_TOKEN_FILE: /run/secrets/ntfy_token
     volumes:
       # Non-secret configuration; required values not overridden by a
       # secret provider must still be filled in here (see README.md).
       - ../.settings.json:/app/.settings.json
-      # Persists the last-seen IP addresses between container restarts.
+      # Persists the last-seen IP addresses, retry state and login backoff
+      # between container restarts.
       - dyndns-cache:/app/.temp
     # Uncomment to mount OpenBAO/Docker secrets referenced above:
     # secrets:
