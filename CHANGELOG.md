@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 When a pull request is merged into `main`, the section matching the version in
 `pyproject.toml` is used as the notes of the GitHub release.
 
+## [1.4.0] - 2026-09-30
+
+### Added
+- Detection of login limits of the netcup API (refused connection, HTTP 429, or an
+  error message about too many logins). A `Connection Refused` error is logged and
+  the run stops logging in for the remaining domains.
+- Login backoff: the next attempt takes place no sooner than 10, then 30, then 60
+  minutes later, configurable via `RATE_LIMIT_BACKOFF_MINUTES`. Runs inside the
+  waiting time exit without contacting any API; `--force` ignores the backoff.
+- ntfy notification when the login is still refused after the last backoff step, and
+  an all-clear notification once logins work again. Configured via `NTFY_SERVER`,
+  `NTFY_TOPIC` and `NTFY_TOKEN` (secret-file and OpenBAO overrides supported).
+- `--rate-limit-backoff-minutes`, `--ntfy-server`, `--ntfy-topic` and `--ntfy-token`
+  command-line options.
+- Tests for login-limit detection, the backoff schedule and ntfy notifications.
+
+### Changed
+- Bumped dev dependencies: pre-commit >= 4.6.2, ruff >= 0.16.9.
+
 ## [1.3.0] - 2026-09-25
 
 ### Added
@@ -66,6 +85,7 @@ When a pull request is merged into `main`, the section matching the version in
 - Settings validation before API requests.
 - uv-based project setup with pytest and ruff CI checks.
 
+[1.4.0]: https://github.com/sowoi/netcup-dyndns-and-trusted-proxies-updater/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/sowoi/netcup-dyndns-and-trusted-proxies-updater/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/sowoi/netcup-dyndns-and-trusted-proxies-updater/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/sowoi/netcup-dyndns-and-trusted-proxies-updater/compare/v1.1.0...v1.2.0

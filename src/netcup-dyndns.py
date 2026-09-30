@@ -6,6 +6,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 import tomllib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from importlib.metadata import version
@@ -65,6 +66,20 @@ DEFAULT_IP_MODE = "both"
 VALID_IP_MODES = {"ipv4", "ipv6", "both"}
 MAX_SUBDOMAIN_RETRIES = 5
 failed_domains_cache_file = "failed_domains.json"
+rate_limit_cache_file = "rate_limit.json"
+# Minimum waiting times (in minutes) before the next login attempt after the
+# netcup API refused a login because of too many logins. Once every step has
+# been waited for and the login is still refused, a ntfy notification is sent.
+DEFAULT_RATE_LIMIT_BACKOFF_MINUTES = (10, 30, 60)
+DEFAULT_NTFY_SERVER = "https://ntfy.sh"
+# Case-insensitive fragments of a netcup login error message that indicate a
+# login limit rather than wrong credentials.
+RATE_LIMIT_MESSAGE_PATTERNS = (
+    "too many",
+    "rate limit",
+    "limit reached",
+    "connection refused",
+)
 PROJECT_FILE = Path(__file__).resolve().parent.parent / "pyproject.toml"
 REPOSITORY_URL = "https://github.com/sowoi/netcup-dyndns-and-trusted-proxies-updater"
 
@@ -78,7 +93,15 @@ default_settings = {
     "PARALLEL_PROCESSES": DEFAULT_PARALLEL_PROCESSES,
     "IP_MODE": DEFAULT_IP_MODE,
     "DISABLE_NEXTCLOUD_NGINX": False,
+    "RATE_LIMIT_BACKOFF_MINUTES": list(DEFAULT_RATE_LIMIT_BACKOFF_MINUTES),
+    "NTFY_SERVER": DEFAULT_NTFY_SERVER,
+    "NTFY_TOPIC": "",
+    "NTFY_TOKEN": "",
 }
+
+
+class NetcupLoginRateLimitError(Exception):
+    """Raised when the netcup API refuses a login because of too many logins."""
 
 
 def read_project_version(project_file=PROJECT_FILE):
@@ -147,6 +170,38 @@ def write_failed_domains(failed_domains, cache_dir=cache_dir):
     cache_path = Path(cache_dir)
     cache_path.mkdir(parents=True, exist_ok=True)
     (cache_path / failed_domains_cache_file).write_text(json.dumps(failed_domains))
+
+
+# Function to read the login rate-limit backoff state from cache
+def read_rate_limit_state(cache_dir=cache_dir):
+    """Return the persisted login rate-limit state, or an empty dict if the
+    netcup API has not refused a login (or the cache file is invalid).
+
+    The state has the keys "failures" (number of consecutive refused login
+    attempts), "next_attempt" (Unix timestamp before which no new attempt is
+    made) and "notified" (whether a ntfy notification was already sent).
+    """
+    cache_path = Path(cache_dir) / rate_limit_cache_file
+    try:
+        data = json.loads(cache_path.read_text())
+        return {
+            "failures": int(data["failures"]),
+            "next_attempt": float(data["next_attempt"]),
+            "notified": bool(data.get("notified", False)),
+        }
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return {}
+
+
+# Function to write the login rate-limit backoff state to cache
+def write_rate_limit_state(state, cache_dir=cache_dir):
+    """Persist the login rate-limit state. An empty state removes the cache file."""
+    cache_path = Path(cache_dir)
+    if not state:
+        (cache_path / rate_limit_cache_file).unlink(missing_ok=True)
+        return
+    cache_path.mkdir(parents=True, exist_ok=True)
+    (cache_path / rate_limit_cache_file).write_text(json.dumps(state))
 
 
 # Validates values in settings.json
@@ -273,6 +328,10 @@ CLI_ARGUMENT_TO_SETTINGS_KEY = {
     "parallel_processes": "PARALLEL_PROCESSES",
     "ip_mode": "IP_MODE",
     "disable_nextcloud_nginx": "DISABLE_NEXTCLOUD_NGINX",
+    "rate_limit_backoff_minutes": "RATE_LIMIT_BACKOFF_MINUTES",
+    "ntfy_server": "NTFY_SERVER",
+    "ntfy_topic": "NTFY_TOPIC",
+    "ntfy_token": "NTFY_TOKEN",
 }
 
 
@@ -392,6 +451,35 @@ def build_arg_parser():
             "Overrides DISABLE_NEXTCLOUD_NGINX."
         ),
     )
+    parser.add_argument(
+        "--rate-limit-backoff-minutes",
+        dest="rate_limit_backoff_minutes",
+        metavar="MINUTES",
+        default=None,
+        help=(
+            "Comma-separated minimum waiting times in minutes between login "
+            "attempts after netcup refused a login because of too many logins, "
+            "e.g. '10,30,60'. Overrides RATE_LIMIT_BACKOFF_MINUTES."
+        ),
+    )
+    parser.add_argument(
+        "--ntfy-server",
+        dest="ntfy_server",
+        default=None,
+        help="ntfy server URL for notifications. Overrides NTFY_SERVER.",
+    )
+    parser.add_argument(
+        "--ntfy-topic",
+        dest="ntfy_topic",
+        default=None,
+        help="ntfy topic to notify; empty disables notifications. Overrides NTFY_TOPIC.",
+    )
+    parser.add_argument(
+        "--ntfy-token",
+        dest="ntfy_token",
+        default=None,
+        help="ntfy access token for protected topics. Overrides NTFY_TOKEN.",
+    )
     return parser
 
 
@@ -441,6 +529,162 @@ def get_ip_mode(settings):
         )
         return DEFAULT_IP_MODE
     return value
+
+
+def get_rate_limit_backoff_minutes(settings):
+    """Return the configured login backoff steps in minutes (default: 10, 30, 60).
+
+    Accepts a list of numbers or a comma-separated string (as passed on the
+    command line or through a secret file).
+    """
+    value = settings.get("RATE_LIMIT_BACKOFF_MINUTES", DEFAULT_RATE_LIMIT_BACKOFF_MINUTES)
+    if isinstance(value, str):
+        value = [part.strip() for part in value.split(",") if part.strip()]
+    try:
+        minutes = [float(step) for step in value]
+        if not minutes or any(step <= 0 for step in minutes):
+            raise ValueError
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid RATE_LIMIT_BACKOFF_MINUTES value %r in settings; using default of %s.",
+            value,
+            list(DEFAULT_RATE_LIMIT_BACKOFF_MINUTES),
+        )
+        return [float(step) for step in DEFAULT_RATE_LIMIT_BACKOFF_MINUTES]
+    return minutes
+
+
+def is_connection_refused(exc):
+    """Return True if a requests exception was caused by a refused connection."""
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, ConnectionRefusedError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return "connection refused" in str(exc).lower()
+
+
+def is_login_rate_limited(login_response):
+    """Return True if a netcup login response reports a login limit."""
+    if not isinstance(login_response, dict) or login_response.get("status") == "success":
+        return False
+    message = " ".join(
+        str(login_response.get(key) or "") for key in ("shortmessage", "longmessage")
+    ).lower()
+    return any(pattern in message for pattern in RATE_LIMIT_MESSAGE_PATTERNS)
+
+
+def format_timestamp(timestamp):
+    """Format a Unix timestamp as local date and time."""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+
+
+def send_ntfy_notification(settings, title, message, priority="high", tags="warning"):
+    """Publish a message to the configured ntfy topic.
+
+    Returns True if the notification was sent, False if no NTFY_TOPIC is
+    configured or the request failed.
+    """
+    topic = str(settings.get("NTFY_TOPIC") or "").strip().strip("/")
+    if not topic:
+        logger.warning("NTFY_TOPIC is not configured; skipping ntfy notification.")
+        return False
+    server = str(settings.get("NTFY_SERVER") or DEFAULT_NTFY_SERVER).rstrip("/")
+    url = f"{server}/{topic}"
+    headers = {"Title": title, "Priority": priority, "Tags": tags}
+    token = settings.get("NTFY_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        response = requests.post(
+            url, data=message.encode("utf-8"), headers=headers, timeout=10
+        )
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        logger.warning("Could not send ntfy notification to %s: %s", url, e)
+        return False
+    logger.info("Sent ntfy notification to %s", url)
+    return True
+
+
+def register_rate_limit_hit(state, backoff_minutes, now):
+    """Return the new rate-limit state and the waiting time in minutes after
+    another refused login. The last backoff step is repeated once all steps
+    have been used."""
+    failures = state.get("failures", 0) + 1
+    delay_minutes = backoff_minutes[min(failures, len(backoff_minutes)) - 1]
+    new_state = {
+        "failures": failures,
+        "next_attempt": now + delay_minutes * 60,
+        "notified": state.get("notified", False),
+    }
+    return new_state, delay_minutes
+
+
+def handle_rate_limit_hit(state, settings, error, now=None):
+    """Log a refused login, schedule the next attempt and send a ntfy
+    notification once the login is still refused after every backoff step.
+    Returns the new rate-limit state."""
+    now = time.time() if now is None else now
+    backoff_minutes = get_rate_limit_backoff_minutes(settings)
+    new_state, delay_minutes = register_rate_limit_hit(state, backoff_minutes, now)
+    logger.error(
+        "Connection Refused: the netcup API refused the login because of too many "
+        "logins (attempt %d): %s",
+        new_state["failures"],
+        error,
+    )
+    if new_state["failures"] > len(backoff_minutes) and not new_state["notified"]:
+        new_state["notified"] = send_ntfy_notification(
+            settings,
+            "netcup DynDNS: Connection Refused",
+            (
+                f"The netcup API still refuses the login because of too many logins "
+                f"after {new_state['failures']} attempts over at least "
+                f"{sum(backoff_minutes):g} minutes. "
+                f"DNS records for {settings.get('NETCUP_DOMAIN', '')} could not be "
+                f"updated. Next attempt not before {format_timestamp(new_state['next_attempt'])}."
+            ),
+        )
+    logger.warning(
+        "Next login attempt not before %s (in %g minutes).",
+        format_timestamp(new_state["next_attempt"]),
+        delay_minutes,
+    )
+    return new_state
+
+
+def handle_rate_limit_recovery(state, settings):
+    """Log that logins work again and, if the refused logins were reported via
+    ntfy, send an all-clear notification."""
+    logger.info(
+        "netcup API accepts logins again after %d refused attempt(s).",
+        state.get("failures", 0),
+    )
+    if state.get("notified"):
+        send_ntfy_notification(
+            settings,
+            "netcup DynDNS: login works again",
+            "The netcup API accepts logins again and the DNS records were updated.",
+            priority="default",
+            tags="white_check_mark",
+        )
+
+
+def build_connection_refused_entry(domain_str, next_attempt):
+    """Build a summary entry for a subdomain skipped because of refused logins."""
+    subdomain, domain = split_domain(domain_str)
+    return {
+        "domain": domain,
+        "subdomain": subdomain,
+        "record_type": "A/AAAA",
+        "destination": (
+            f"{RED_COLOR}CONNECTION REFUSED - retry after "
+            f"{format_timestamp(next_attempt)}{RESET_COLOR}"
+        ),
+    }
 
 
 def check_endpoint_reachable(url, timeout=5):
@@ -549,11 +793,21 @@ def process_subdomain(domain_str, settings, IPv4, IPv6):
     }
 
     try:
-        loginResponse = requests.post(url=NETCUP_API, json=loginRequest).json()
+        loginHttpResponse = requests.post(url=NETCUP_API, json=loginRequest)
+        if getattr(loginHttpResponse, "status_code", None) == 429:
+            raise NetcupLoginRateLimitError(f"HTTP 429 Too Many Requests during login for {domain_str}")
+        loginResponse = loginHttpResponse.json()
     except requests.RequestException as e:
+        if is_connection_refused(e):
+            raise NetcupLoginRateLimitError(f"Connection refused during login for {domain_str}: {e}") from e
         logger.error("HTTP Error during login for %s: %s", domain_str, e)
         return [{"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A/AAAA",
                  "destination": f"{RED}LOGIN FAILED{RESET}"}], 2
+
+    if is_login_rate_limited(loginResponse):
+        raise NetcupLoginRateLimitError(
+            f"Login refused for {domain_str}: {loginResponse.get('longmessage') or loginResponse.get('shortmessage')}"
+        )
 
     if loginResponse.get("status") != "success":
         logger.error("Could not login at netcup API server for %s", domain_str)
@@ -706,6 +960,22 @@ def main(argv=None):
         settings = apply_cli_overrides(settings, args)
         validate_settings(settings)
 
+    rate_limit_state = read_rate_limit_state(cache_dir=active_cache_dir)
+    if rate_limit_state and time.time() < rate_limit_state["next_attempt"]:
+        if args.force:
+            logger.warning(
+                "--force given: attempting a login despite the login backoff after "
+                "Connection Refused (planned for %s).",
+                format_timestamp(rate_limit_state["next_attempt"]),
+            )
+        else:
+            logger.warning(
+                "Connection Refused: the netcup API refused the login because of too many "
+                "logins. Skipping this run; next attempt not before %s.",
+                format_timestamp(rate_limit_state["next_attempt"]),
+            )
+            sys.exit(0)
+
     IPv4 = requests.get(url=IPV4_API).json()["ip"]
     logger.info("Current public IPv4 address: %s", IPv4)
 
@@ -719,8 +989,14 @@ def main(argv=None):
     ip_changed = not (IPv4 == cached_ipv4 and IPv6 == cached_ipv6)
     if args.force and not ip_changed:
         logger.info("--force given: updating DNS records despite unchanged cached IP addresses.")
-    # --force is treated like a real IP change so every configured domain is updated.
-    ip_changed = ip_changed or args.force
+    if rate_limit_state and not ip_changed and not args.force:
+        logger.info(
+            "Retrying all domains after %d refused login attempt(s).",
+            rate_limit_state["failures"],
+        )
+    # --force and a pending login backoff are treated like a real IP change so
+    # every configured domain is updated.
+    ip_changed = ip_changed or args.force or bool(rate_limit_state)
     pending_retry_domains = {
         domain for domain, count in failed_domains.items() if count < MAX_SUBDOMAIN_RETRIES
     }
@@ -810,6 +1086,7 @@ def main(argv=None):
 
     updated_records = []
     domain_had_error = {}
+    rate_limit_error = None
     parallel_workers = get_parallel_processes(settings)
 
     if parallel_workers > 1:
@@ -823,10 +1100,18 @@ def main(argv=None):
             # Sobald Threads fertig sind, hole die Ergebnisse ab
             for future in as_completed(future_to_domain):
                 domain = future_to_domain[future]
+                if future.cancelled():
+                    continue
                 try:
                     res, count = future.result()
                     updated_records.extend(res)
                     domain_had_error[domain] = any(RED_COLOR in r["destination"] for r in res)
+                except NetcupLoginRateLimitError as exc:
+                    # Further logins would be refused as well; skip the domains not started yet.
+                    rate_limit_error = exc
+                    for pending in future_to_domain:
+                        pending.cancel()
+                    continue
                 except (KeyError, TypeError, requests.RequestException) as exc:
                     logger.error("%r generated an exception: %s", domain, exc)
                     # Falls der ganze Thread crasht, fügen wir einen Fehlereintrag hinzu
@@ -841,12 +1126,32 @@ def main(argv=None):
     else:
         logger.info("Running sequentially (PARALLEL_PROCESSES <= 1).")
         for domain in domains_list:
-            res, count = process_subdomain(domain, settings, IPv4, IPv6)
+            try:
+                res, count = process_subdomain(domain, settings, IPv4, IPv6)
+            except NetcupLoginRateLimitError as exc:
+                # Further logins would be refused as well; skip the remaining domains.
+                rate_limit_error = exc
+                break
             updated_records.extend(res)
             domain_had_error[domain] = any(RED_COLOR in r["destination"] for r in res)
             progress_bar.update(count)
 
     progress_bar.close()
+
+    if rate_limit_error is not None:
+        # Refused logins say nothing about the domain configuration, so the
+        # skipped domains are not counted against their retry budget. They are
+        # all updated on the next attempt after the backoff.
+        rate_limit_state = handle_rate_limit_hit(rate_limit_state, settings, rate_limit_error)
+        write_rate_limit_state(rate_limit_state, cache_dir=active_cache_dir)
+        updated_records.extend(
+            build_connection_refused_entry(domain, rate_limit_state["next_attempt"])
+            for domain in domains_list
+            if domain not in domain_had_error
+        )
+    elif rate_limit_state:
+        handle_rate_limit_recovery(rate_limit_state, settings)
+        write_rate_limit_state({}, cache_dir=active_cache_dir)
 
     # Update the failure-retry cache: domains that succeeded are cleared,
     # domains that failed again have their counter incremented (capped at
