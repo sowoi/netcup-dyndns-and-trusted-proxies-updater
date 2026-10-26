@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 When a pull request is merged into `main`, the section matching the version in
 `pyproject.toml` is used as the notes of the GitHub release.
 
+## [1.4.1] - 2026-10-26
+
+### Changed
+- Updated locked dependencies (ruff 0.17.2, pre-commit 4.7.0, pytest-mock 3.17.0,
+  certifi 2026.10.23 and others).
+
 ## [1.4.0] - 2026-09-30
 
 ### Added
@@ -85,6 +91,7 @@ When a pull request is merged into `main`, the section matching the version in
 - Settings validation before API requests.
 - uv-based project setup with pytest and ruff CI checks.
 
+[1.4.1]: https://github.com/sowoi/netcup-dyndns-and-trusted-proxies-updater/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/sowoi/netcup-dyndns-and-trusted-proxies-updater/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/sowoi/netcup-dyndns-and-trusted-proxies-updater/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/sowoi/netcup-dyndns-and-trusted-proxies-updater/compare/v1.2.0...v1.2.1

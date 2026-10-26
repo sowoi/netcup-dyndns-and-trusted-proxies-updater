@@ -43,9 +43,9 @@ pip install --upgrade netcup-dyndns-and-trusted-proxies-updater
 
 To install a specific version instead, for example to roll back:
 ```
-pipx install --force netcup-dyndns-and-trusted-proxies-updater==1.4.0
-uv tool install --force netcup-dyndns-and-trusted-proxies-updater==1.4.0
-pip install netcup-dyndns-and-trusted-proxies-updater==1.4.0
+pipx install --force netcup-dyndns-and-trusted-proxies-updater==1.4.1
+uv tool install --force netcup-dyndns-and-trusted-proxies-updater==1.4.1
+pip install netcup-dyndns-and-trusted-proxies-updater==1.4.1
 ```
 
 Confirm the installed version afterwards with `netcup-dyndns --version`. Updating
