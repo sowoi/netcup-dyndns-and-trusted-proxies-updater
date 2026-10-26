@@ -287,7 +287,7 @@ wheels = [
 
 [[package]]
 name = "netcup-dyndns-and-trusted-proxies-updater"
-version = "1.4.0"
+version = "1.4.1"
 source = { editable = "." }
 dependencies = [
     { name = "requests" },
