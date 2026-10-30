@@ -170,7 +170,7 @@ def test_main_dns_update_runs_before_trusted_proxy_update(mocker):
     calls = []
     mocker.patch(
         "src.updateDynDns.process_zone",
-        side_effect=lambda *args: calls.append("dns") or {},
+        side_effect=lambda *args, **kwargs: calls.append("dns") or {},
     )
     mocker.patch(
         "src.updateDynDns.nginx_trusted_proxies_configuration",

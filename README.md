@@ -111,7 +111,10 @@ The first run will create a settings.json file and a temp folder in your project
     "RATE_LIMIT_BACKOFF_MINUTES": [10, 30, 60],
     "NTFY_SERVER": "https://ntfy.sh",
     "NTFY_TOPIC": "",
-    "NTFY_TOKEN": ""
+    "NTFY_TOKEN": "",
+    "NTFY_NOTIFY_IP_CHANGE": false,
+    "NTFY_NOTIFY_FAILURES": false,
+    "CREATE_MISSING_RECORDS": false
 }
 ```
 
@@ -128,9 +131,16 @@ RATE_LIMIT_BACKOFF_MINUTES: Minimum waiting times in minutes between login attem
 NTFY_SERVER: The ntfy server used for notifications (Default: https://ntfy.sh).
 NTFY_TOPIC: The ntfy topic that receives a notification when the login is still refused after the last backoff step. Leave empty to disable notifications (Default: empty).
 NTFY_TOKEN: Optional ntfy access token for protected topics, sent as `Authorization: Bearer <token>` (Default: empty).
+NTFY_NOTIFY_IP_CHANGE: Send a ntfy notification when the public IP address changed, with the old and new addresses and whether all DNS records were updated (Default: false).
+NTFY_NOTIFY_FAILURES: Send a ntfy notification once when a domain still fails after all retries (Default: false). See [Notifications](#notifications).
+CREATE_MISSING_RECORDS: Create A/AAAA records that do not exist yet for a configured host instead of reporting `RECORD NOT FOUND` (Default: false).
 
-Settings files created by an earlier version do not contain the `RATE_LIMIT_BACKOFF_MINUTES`
-and `NTFY_*` keys. The defaults apply until you add them.
+Boolean settings also accept the strings `"true"`/`"false"` (as well as `"1"`/`"0"`,
+`"yes"`/`"no"`, `"on"`/`"off"`), e.g. when they come from a secret file.
+
+Settings files created by an earlier version do not contain the newer keys, such as
+`RATE_LIMIT_BACKOFF_MINUTES`, `NTFY_*` and `CREATE_MISSING_RECORDS`. The defaults apply
+until you add them.
 
 ## Command-Line Arguments
 
@@ -147,10 +157,25 @@ netcup-dyndns --help
 ```
 options:
   -h, --help            show this help message and exit
-  --version             show the version and repository URL, then exit
-  --settings-file PATH  path to the settings JSON file
-  --cache-dir PATH      directory for temporary IP and retry cache files
-  --show-paths          show the resolved settings-file and cache-directory paths, then exit
+  --version             show program's version number and exit
+  -v, --verbose         Show debug output, e.g. every netcup API request and
+                        the found records.
+  -q, --quiet           Show only warnings and errors. The summary is still
+                        shown if a record failed.
+  --dry-run             Show what would be updated without changing DNS
+                        records, the Nextcloud configuration, the cache or
+                        sending notifications. Logs in to netcup to read the
+                        current records.
+  --health-check [MAX_AGE_SECONDS]
+                        Exit with 0 if the last successful run finished at
+                        most MAX_AGE_SECONDS ago (default: 900), 1 otherwise,
+                        without updating anything. Used as Docker HEALTHCHECK.
+  --settings-file PATH  Path to the settings JSON file. Defaults to
+                        .settings.json.
+  --cache-dir PATH      Directory for temporary IP and retry cache files.
+                        Defaults to .temp.
+  --show-paths          Show the resolved settings-file and cache-directory
+                        paths, then exit.
   --force               Force a DNS update of all domains, ignoring the cached
                         IPv4/IPv6 addresses.
   --api-password API_PASSWORD
@@ -180,8 +205,8 @@ options:
   --rate-limit-backoff-minutes MINUTES
                         Comma-separated minimum waiting times in minutes
                         between login attempts after netcup refused a login
-                        because of too many logins, e.g. '10,30,60'.
-                        Overrides RATE_LIMIT_BACKOFF_MINUTES.
+                        because of too many logins, e.g. '10,30,60'. Overrides
+                        RATE_LIMIT_BACKOFF_MINUTES.
   --ntfy-server NTFY_SERVER
                         ntfy server URL for notifications. Overrides
                         NTFY_SERVER.
@@ -191,12 +216,41 @@ options:
   --ntfy-token NTFY_TOKEN
                         ntfy access token for protected topics. Overrides
                         NTFY_TOKEN.
+  --ntfy-notify-ip-change, --no-ntfy-notify-ip-change
+                        Send a ntfy notification when the public IP address
+                        changed. Overrides NTFY_NOTIFY_IP_CHANGE.
+  --ntfy-notify-failures, --no-ntfy-notify-failures
+                        Send a ntfy notification when a domain still fails
+                        after all retries. Overrides NTFY_NOTIFY_FAILURES.
+  --create-missing-records, --no-create-missing-records
+                        Create missing A/AAAA records instead of reporting
+                        them. Overrides CREATE_MISSING_RECORDS.
 ```
 
 Example, overriding just the domain for a single run without touching `.settings.json`:
 ```
 netcup-dyndns --netcup-domain example.com,example.net
 ```
+
+### Dry Run
+
+`--dry-run` shows what a run would change without changing anything:
+```
+netcup-dyndns --dry-run
+netcup-dyndns --dry-run --force    # every domain, even if the IP did not change
+```
+A dry run determines the public addresses, logs in to netcup and reads the DNS records,
+then lists every record as `(unchanged)`, `(would update)` or `(would create)`. It does
+not send updates to netcup, does not run OCC or reload nginx, does not write the
+settings file or any cache file, and does not send notifications. It follows the same
+rules as a normal run, so without `--force` it exits early when the IP did not change.
+
+### Log Output
+
+`-v`/`--verbose` adds debug output, such as the paths in use, every netcup API session
+and the records found in each zone. `-q`/`--quiet` shows only warnings and errors. A
+successful run is then silent, while a run with failed records still prints the summary
+(as a warning), which suits cron jobs that mail any output.
 
 ## Docker Installation (alternative)
 
@@ -227,7 +281,19 @@ no `uv`, compilers, or other build tools are present in the image you actually r
    docker compose -f Docker/docker-compose.yml run --rm -e RUN_ONCE=true netcup-dyndns-updater
    ```
 
-3. **Nextcloud/Nginx integration caveat:** `nginx_trusted_proxies_configuration` shells out
+3. **Health check:** The image defines a Docker `HEALTHCHECK`. Every successful run
+   records its time in `last_success.txt` in the cache directory, and the container is
+   reported healthy while the last successful run is at most three update intervals
+   (`UPDATE_INTERVAL_SECONDS`, 15 minutes by default) old. Failed runs, invalid
+   settings and runs skipped because of the netcup login backoff do not count. Check
+   it with `docker ps` or:
+   ```
+   docker inspect --format '{{.State.Health.Status}}' netcup-dyndns-updater
+   ```
+   Outside Docker, `netcup-dyndns --health-check [MAX_AGE_SECONDS]` performs the same
+   check (default: 900 seconds) and exits with 0 or 1.
+
+4. **Nextcloud/Nginx integration caveat:** `nginx_trusted_proxies_configuration` shells out
    to `sudo`, `php occ`, and `systemctl reload nginx` on the host. These are not available
    inside the minimal container, so set `DISABLE_NEXTCLOUD_NGINX: true` in `.settings.json`
    when running via Docker unless you specifically bind-mount those host binaries into a
@@ -306,6 +372,18 @@ Notifications are sent only if `NTFY_TOPIC` is set. To use them:
    server) and subscribe to it in the ntfy app.
 2. Set `NTFY_TOPIC` in `.settings.json`. Set `NTFY_SERVER` for a self-hosted server and
    `NTFY_TOKEN` if the topic requires authentication.
+
+### Notifications
+
+Besides the login-limit notification, two optional notifications use the same ntfy
+topic:
+
+* `NTFY_NOTIFY_IP_CHANGE`: after the public IP address changed, a notification lists
+  the old and new addresses and whether all DNS records were updated. Runs with
+  `--force` or retries without an IP change do not send it.
+* `NTFY_NOTIFY_FAILURES`: when a domain fails for the fifth time in a row (and is no
+  longer retried until the next IP change), a notification names it. It is sent once
+  per domain, not on every following run.
 
 `NTFY_TOKEN` can also be provided at runtime as described in
 [Providing Secrets at Runtime](#providing-secrets-at-runtime), e.g. via `NTFY_TOKEN_FILE`.

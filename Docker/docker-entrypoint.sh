@@ -16,7 +16,7 @@ INTERVAL="${UPDATE_INTERVAL_SECONDS:-300}"
 # print usage once per loop iteration and never return control.
 for arg in "$@"; do
     case "$arg" in
-        -h|--help)
+        -h|--help|--version|--show-paths|--health-check|--health-check=*)
             exec python src/netcup-dyndns.py "$@"
             ;;
     esac

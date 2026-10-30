@@ -51,4 +51,9 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 USER app
 
+# Healthy while the last successful run is at most three update intervals old.
+# Runs skipped because of the netcup login backoff do not count as successful.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
+    CMD python src/netcup-dyndns.py --health-check "$(( ${UPDATE_INTERVAL_SECONDS:-300} * 3 ))"
+
 ENTRYPOINT ["./docker-entrypoint.sh"]
