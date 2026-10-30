@@ -42,7 +42,7 @@ When a pull request is merged into `main`, the section matching the version in
 - Docker image based on Python 3.15 (Debian trixie) and uv 0.13.
 - Updated dependencies and tooling: setuptools >= 84.2.1 (build), pytest 9.2.0, ruff 0.17.3, virtualenv 21.15.1,
   platformdirs 4.14.0 and others; GitHub Actions `actions/checkout@v7` and
-  `astral-sh/setup-uv@v10`; pre-commit hooks uv 0.13.6 and ruff 0.17.3.
+  `astral-sh/setup-uv@v10.3.3`; pre-commit hooks uv 0.13.6 and ruff 0.17.3.
 
 ### Fixed
 - DNS records were never updated after an IP change if the OCC call or the nginx
