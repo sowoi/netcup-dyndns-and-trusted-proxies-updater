@@ -13,7 +13,7 @@ from src.netcup_dyndns import (
     is_connection_refused,
     is_login_rate_limited,
     main,
-    process_subdomain,
+    process_zone,
     read_rate_limit_state,
     register_rate_limit_hit,
     send_ntfy_notification,
@@ -28,6 +28,7 @@ SETTINGS = {
     "DISABLE_NEXTCLOUD_NGINX": True,
     "NTFY_TOPIC": "dyndns-alerts",
 }
+ENTRIES = [("sub.example.com", "sub")]
 
 
 def _connection_refused_error():
@@ -138,7 +139,7 @@ def test_write_empty_rate_limit_state_without_file(tmp_path):
 
 @pytest.mark.parametrize("content", ["not json", "[]", '{"failures": 1}', '{"failures": "x", "next_attempt": 1}'])
 def test_read_rate_limit_state_empty_for_invalid_file(tmp_path, content):
-    (tmp_path / "rate_limit.json").write_text(content)
+    (tmp_path / "rate_limit.json").write_text(content, encoding="utf-8")
     assert read_rate_limit_state(cache_dir=tmp_path) == {}
 
 
@@ -259,45 +260,46 @@ def test_send_ntfy_notification_returns_false_on_http_error(mocker):
     assert send_ntfy_notification({"NTFY_TOPIC": "alerts"}, "Title", "Hello") is False
 
 
-# --- process_subdomain login ----------------------------------------------
+# --- process_zone login ----------------------------------------------
 
 
-def test_process_subdomain_raises_on_connection_refused(mocker):
+def test_process_zone_raises_on_connection_refused(mocker):
     post_mock = mocker.patch("requests.post", side_effect=_connection_refused_error())
     with pytest.raises(NetcupLoginRateLimitError):
-        process_subdomain("sub.example.com", SETTINGS, "1.2.3.4", "::1")
+        process_zone("example.com", ENTRIES, SETTINGS, "1.2.3.4", "::1")
     # No logout without a session.
     assert post_mock.call_count == 1
 
 
-def test_process_subdomain_raises_on_http_429(mocker):
+def test_process_zone_raises_on_http_429(mocker):
     mocker.patch("requests.post", return_value=_response(mocker, status_code=429))
     with pytest.raises(NetcupLoginRateLimitError):
-        process_subdomain("sub.example.com", SETTINGS, "1.2.3.4", "::1")
+        process_zone("example.com", ENTRIES, SETTINGS, "1.2.3.4", "::1")
 
 
-def test_process_subdomain_raises_on_login_limit_message(mocker):
+def test_process_zone_raises_on_login_limit_message(mocker):
     mocker.patch(
         "requests.post",
         return_value=_response(mocker, {"status": "error", "longmessage": "Too many logins"}),
     )
     with pytest.raises(NetcupLoginRateLimitError, match="Too many logins"):
-        process_subdomain("sub.example.com", SETTINGS, "1.2.3.4", "::1")
+        process_zone("example.com", ENTRIES, SETTINGS, "1.2.3.4", "::1")
 
 
-def test_process_subdomain_other_connection_error_is_login_failed(mocker):
+def test_process_zone_other_connection_error_is_login_failed(mocker):
     mocker.patch("requests.post", side_effect=requests.exceptions.Timeout("timed out"))
-    results, _ = process_subdomain("sub.example.com", SETTINGS, "1.2.3.4", "::1")
-    assert "LOGIN FAILED" in results[0]["destination"]
+    results = process_zone("example.com", ENTRIES, SETTINGS, "1.2.3.4", "::1")
+    assert results["sub.example.com"][0]["destination"] == "LOGIN FAILED"
+    assert results["sub.example.com"][0]["error"] is True
 
 
-def test_process_subdomain_wrong_credentials_is_login_refused(mocker):
+def test_process_zone_wrong_credentials_is_login_refused(mocker):
     mocker.patch(
         "requests.post",
         return_value=_response(mocker, {"status": "error", "longmessage": "Invalid API key"}),
     )
-    results, _ = process_subdomain("sub.example.com", SETTINGS, "1.2.3.4", "::1")
-    assert "LOGIN REFUSED" in results[0]["destination"]
+    results = process_zone("example.com", ENTRIES, SETTINGS, "1.2.3.4", "::1")
+    assert results["sub.example.com"][0]["destination"] == "LOGIN REFUSED"
 
 
 # --- main() with mocked helpers -------------------------------------------
@@ -332,7 +334,7 @@ def test_main_skips_run_during_backoff(mocker, caplog):
     mocks = _main_mocks(
         mocker, {"failures": 1, "next_attempt": time.time() + 600, "notified": False}
     )
-    process_mock = mocker.patch("src.updateDynDns.process_subdomain")
+    process_mock = mocker.patch("src.updateDynDns.process_zone")
 
     with caplog.at_level("INFO"), pytest.raises(SystemExit) as exc_info:
         main([])
@@ -347,7 +349,7 @@ def test_main_force_ignores_backoff(mocker, caplog):
     _main_mocks(
         mocker, {"failures": 1, "next_attempt": time.time() + 600, "notified": False}
     )
-    process_mock = mocker.patch("src.updateDynDns.process_subdomain", return_value=([], 2))
+    process_mock = mocker.patch("src.updateDynDns.process_zone", return_value={})
 
     with caplog.at_level("INFO"):
         main(["--force"])
@@ -363,11 +365,11 @@ def test_main_retries_all_domains_after_backoff_despite_unchanged_ips(mocker):
         cached_ips=("1.2.3.4", "::1"),
         settings=dict(SETTINGS, NETCUP_DOMAIN="a.example.com,b.example.com"),
     )
-    process_mock = mocker.patch("src.updateDynDns.process_subdomain", return_value=([], 2))
+    process_mock = mocker.patch("src.updateDynDns.process_zone", return_value={})
 
     main([])
 
-    assert sorted(call.args[0] for call in process_mock.call_args_list) == [
+    assert [entry for entry, _ in process_mock.call_args.args[1]] == [
         "a.example.com",
         "b.example.com",
     ]
@@ -381,7 +383,7 @@ def test_main_sends_all_clear_after_notified_rate_limit(mocker):
     mocks = _main_mocks(
         mocker, {"failures": 4, "next_attempt": time.time() - 1, "notified": True}
     )
-    mocker.patch("src.updateDynDns.process_subdomain", return_value=([], 2))
+    mocker.patch("src.updateDynDns.process_zone", return_value={})
 
     main([])
 
@@ -392,7 +394,7 @@ def test_main_sends_all_clear_after_notified_rate_limit(mocker):
 
 def test_main_does_not_write_state_without_rate_limit(mocker):
     mocks = _main_mocks(mocker)
-    mocker.patch("src.updateDynDns.process_subdomain", return_value=([], 2))
+    mocker.patch("src.updateDynDns.process_zone", return_value={})
 
     main([])
 
@@ -401,17 +403,17 @@ def test_main_does_not_write_state_without_rate_limit(mocker):
 
 def test_main_rate_limit_stops_sequential_run_and_records_backoff(mocker, caplog):
     mocks = _main_mocks(
-        mocker, settings=dict(SETTINGS, NETCUP_DOMAIN="a.example.com,b.example.com")
+        mocker, settings=dict(SETTINGS, NETCUP_DOMAIN="a.example.com,b.example.net")
     )
     process_mock = mocker.patch(
-        "src.updateDynDns.process_subdomain",
+        "src.updateDynDns.process_zone",
         side_effect=NetcupLoginRateLimitError("Connection refused"),
     )
 
     with caplog.at_level("INFO"):
         main([])
 
-    # The second domain is not tried: its login would be refused as well.
+    # The second zone is not tried: its login would be refused as well.
     process_mock.assert_called_once()
     state = mocks.write_state.call_args.args[0]
     assert state["failures"] == 1
@@ -424,12 +426,12 @@ def test_main_rate_limit_stops_sequential_run_and_records_backoff(mocker, caplog
 
 def test_main_rate_limit_keeps_results_of_domains_updated_before(mocker, caplog):
     mocks = _main_mocks(
-        mocker, settings=dict(SETTINGS, NETCUP_DOMAIN="a.example.com,b.example.com")
+        mocker, settings=dict(SETTINGS, NETCUP_DOMAIN="a.example.com,b.example.net")
     )
     ok = [{"domain": "example.com", "subdomain": "a", "record_type": "A", "destination": "1.2.3.4"}]
     mocker.patch(
-        "src.updateDynDns.process_subdomain",
-        side_effect=[(ok, 2), NetcupLoginRateLimitError("Connection refused")],
+        "src.updateDynDns.process_zone",
+        side_effect=[{"a.example.com": ok}, NetcupLoginRateLimitError("Connection refused")],
     )
 
     with caplog.at_level("INFO"):
@@ -444,11 +446,11 @@ def test_main_rate_limit_in_parallel_mode(mocker, caplog):
     mocks = _main_mocks(
         mocker,
         settings=dict(
-            SETTINGS, NETCUP_DOMAIN="a.example.com,b.example.com", PARALLEL_PROCESSES=2
+            SETTINGS, NETCUP_DOMAIN="a.example.com,b.example.net", PARALLEL_PROCESSES=2
         ),
     )
     mocker.patch(
-        "src.updateDynDns.process_subdomain",
+        "src.updateDynDns.process_zone",
         side_effect=NetcupLoginRateLimitError("Connection refused"),
     )
 
@@ -469,7 +471,7 @@ def test_main_backoff_sequence_and_ntfy_notification(tmp_path, mocker):
     when the login is still refused after 60 minutes, and an all-clear is
     sent once logins work again."""
     settings_file = tmp_path / "settings.json"
-    settings_file.write_text(json.dumps(SETTINGS))
+    settings_file.write_text(json.dumps(SETTINGS), encoding="utf-8")
     cache_dir = tmp_path / "cache"
     argv = ["--settings-file", str(settings_file), "--cache-dir", str(cache_dir)]
 
@@ -542,7 +544,7 @@ def test_main_backoff_sequence_and_ntfy_notification(tmp_path, mocker):
     assert run_at(160)["failures"] == 5
     assert len(ntfy_messages) == 1
     # Refused logins never count against the retry budget.
-    assert json.loads((cache_dir / "failed_domains.json").read_text()) == {}
+    assert json.loads((cache_dir / "failed_domains.json").read_text(encoding="utf-8")) == {}
 
     # Logins work again: records are updated, state cleared, all-clear sent.
     netcup_available[0] = True

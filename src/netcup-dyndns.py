@@ -1,6 +1,7 @@
 # ruff: noqa: N999
 
 import argparse
+import ipaddress
 import json
 import logging
 import os
@@ -8,8 +9,9 @@ import subprocess
 import sys
 import time
 import tomllib
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import requests
@@ -33,17 +35,37 @@ class ColorFormatter(logging.Formatter):
     RED = "\033[91m"
     RESET = "\033[0m"
 
+    def __init__(self, *args, use_color=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.use_color = use_color
+
     def format(self, record):
         message = super().format(record)
-        if record.levelno >= logging.ERROR:
+        if self.use_color and record.levelno >= logging.ERROR:
             return f"{self.RED}{message}{self.RESET}"
         return message
+
+
+def colors_enabled(stream=None, env=None):
+    """Return True if ANSI colors should be used: the stream is a terminal and
+    the NO_COLOR environment variable (https://no-color.org) is not set."""
+    env = os.environ if env is None else env
+    if env.get("NO_COLOR"):
+        return False
+    stream = sys.stdout if stream is None else stream
+    isatty = getattr(stream, "isatty", None)
+    try:
+        return bool(isatty and isatty())
+    except ValueError:
+        return False
 
 
 _handler = TqdmLoggingHandler()
 _handler.setFormatter(
     ColorFormatter(
-        fmt="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+        fmt="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        use_color=colors_enabled(),
     )
 )
 logging.basicConfig(level=logging.INFO, handlers=[_handler])
@@ -53,8 +75,11 @@ conf = ".settings.json"
 cache_dir = ".temp"
 # URLs to APIs
 NETCUP_API = "https://ccp.netcup.net/run/webservice/servers/endpoint.php?JSON"
-IPV4_API = "https://api.ipify.org?format=json"
-IPV6_API = "https://api6.ipify.org?format=json"
+# Public IP providers, tried in order until one returns a valid address.
+IPV4_APIS = ("https://api.ipify.org?format=json", "https://ipv4.icanhazip.com")
+IPV6_APIS = ("https://api6.ipify.org?format=json", "https://ipv6.icanhazip.com")
+# Timeout in seconds for every HTTP request to the IP providers and netcup.
+REQUEST_TIMEOUT = 10
 
 RED_COLOR = "\033[91m"
 RESET_COLOR = "\033[0m"
@@ -67,6 +92,11 @@ VALID_IP_MODES = {"ipv4", "ipv6", "both"}
 MAX_SUBDOMAIN_RETRIES = 5
 failed_domains_cache_file = "failed_domains.json"
 rate_limit_cache_file = "rate_limit.json"
+trusted_proxy_cache_file = "trusted_proxy.txt"
+# Separates hostname and zone in a NETCUP_DOMAIN entry with an explicit zone,
+# e.g. "www@example.co.uk" or "@example.co.uk" for the zone apex.
+ZONE_SEPARATOR = "@"
+APEX_HOSTNAME = "@"
 # Minimum waiting times (in minutes) before the next login attempt after the
 # netcup API refused a login because of too many logins. Once every step has
 # been waited for and the login is still refused, a ntfy notification is sent.
@@ -105,17 +135,21 @@ class NetcupLoginRateLimitError(Exception):
 
 
 def read_project_version(project_file=PROJECT_FILE):
-    """Return the project version declared in pyproject.toml."""
+    """Return the project version declared in pyproject.toml, falling back to
+    the installed package metadata, or "unknown" if neither is available."""
     if project_file.exists():
         with project_file.open("rb") as file:
             return tomllib.load(file)["project"]["version"]
-    return version("netcup-dyndns-and-trusted-proxies-updater")
+    try:
+        return version("netcup-dyndns-and-trusted-proxies-updater")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 def create_settings_file_if_not_exists(file_path, default_content):
     settings_file_path = Path(file_path)
     if not settings_file_path.exists():
-        with open(file_path, "w") as f:
+        with open(file_path, "w", encoding="utf-8") as f:
             json.dump(default_content, f, indent=4)
         logger.info("Settings file created at %s", file_path)
     else:
@@ -126,8 +160,8 @@ def create_settings_file_if_not_exists(file_path, default_content):
 def read_cached_ips(ipv4_cache=None, ipv6_cache=None, cache_dir=cache_dir):
     cache_path = Path(cache_dir)
     try:
-        ipv4_cache = (cache_path / "ipv4_cache.txt").read_text() or None
-        ipv6_cache = (cache_path / "ipv6_cache.txt").read_text() or None
+        ipv4_cache = (cache_path / "ipv4_cache.txt").read_text(encoding="utf-8") or None
+        ipv6_cache = (cache_path / "ipv6_cache.txt").read_text(encoding="utf-8") or None
     except FileNotFoundError:
         pass
     return ipv4_cache, ipv6_cache
@@ -140,8 +174,8 @@ def write_cached_ips(ipv4, ipv6=None, cache_dir=cache_dir):
 
     # Cache files always store a string; unavailable addresses (e.g. no IPv6
     # connectivity) are written as an empty string and read back as None.
-    (cache_path / "ipv4_cache.txt").write_text(ipv4 or "")
-    (cache_path / "ipv6_cache.txt").write_text(ipv6 or "")
+    (cache_path / "ipv4_cache.txt").write_text(ipv4 or "", encoding="utf-8")
+    (cache_path / "ipv6_cache.txt").write_text(ipv6 or "", encoding="utf-8")
 
 
 # Function to read the per-subdomain failure/retry counters from cache
@@ -152,7 +186,7 @@ def read_failed_domains(cache_dir=cache_dir):
     """
     cache_path = Path(cache_dir) / failed_domains_cache_file
     try:
-        data = json.loads(cache_path.read_text())
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
     if not isinstance(data, dict):
@@ -169,7 +203,7 @@ def write_failed_domains(failed_domains, cache_dir=cache_dir):
     """Persist the per-subdomain failure/retry counters to cache."""
     cache_path = Path(cache_dir)
     cache_path.mkdir(parents=True, exist_ok=True)
-    (cache_path / failed_domains_cache_file).write_text(json.dumps(failed_domains))
+    (cache_path / failed_domains_cache_file).write_text(json.dumps(failed_domains), encoding="utf-8")
 
 
 # Function to read the login rate-limit backoff state from cache
@@ -183,7 +217,7 @@ def read_rate_limit_state(cache_dir=cache_dir):
     """
     cache_path = Path(cache_dir) / rate_limit_cache_file
     try:
-        data = json.loads(cache_path.read_text())
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
         return {
             "failures": int(data["failures"]),
             "next_attempt": float(data["next_attempt"]),
@@ -201,7 +235,25 @@ def write_rate_limit_state(state, cache_dir=cache_dir):
         (cache_path / rate_limit_cache_file).unlink(missing_ok=True)
         return
     cache_path.mkdir(parents=True, exist_ok=True)
-    (cache_path / rate_limit_cache_file).write_text(json.dumps(state))
+    (cache_path / rate_limit_cache_file).write_text(json.dumps(state), encoding="utf-8")
+
+
+# Function to read the IPv6 address last applied to the Nextcloud trusted proxies
+def read_trusted_proxy_ip(cache_dir=cache_dir):
+    """Return the IPv6 address last written to the Nextcloud trusted_proxies
+    configuration, or None if it was never applied (or the cache is missing)."""
+    try:
+        return (Path(cache_dir) / trusted_proxy_cache_file).read_text(encoding="utf-8").strip() or None
+    except FileNotFoundError:
+        return None
+
+
+# Function to write the IPv6 address last applied to the Nextcloud trusted proxies
+def write_trusted_proxy_ip(ipv6, cache_dir=cache_dir):
+    """Persist the IPv6 address that was written to the trusted_proxies configuration."""
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+    (cache_path / trusted_proxy_cache_file).write_text(ipv6, encoding="utf-8")
 
 
 # Validates values in settings.json
@@ -217,11 +269,42 @@ def validate_settings(settings):
 
     for key in required_keys:
         if key not in settings:
-            raise KeyError(f"The key {key} is missing in the configuration file.")
+            raise KeyError(f"The key {key} is missing in the settings file.")
         if not settings[key]:
             raise ValueError(
-                f"The key {key} cannot be empty. Please fill in the missing value in the .settings.json file."
+                f"The key {key} cannot be empty. Please fill in the missing value in the settings file."
             )
+
+
+def load_settings(settings_path, args):
+    """Read the settings file, apply secret and command-line overrides and
+    validate the result. Exits with status 1 and a readable error message if
+    the file is missing, is not valid JSON or lacks required values."""
+    try:
+        with open(settings_path, encoding="utf-8") as fp:
+            settings = json.load(fp)
+    except FileNotFoundError:
+        logger.error("Settings file %s not found.", settings_path)
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        logger.error("Settings file %s is not a valid JSON document: %s", settings_path, e)
+        sys.exit(1)
+    except OSError as e:
+        # e.g. a directory created by a Docker bind mount of a missing file.
+        logger.error("Could not read settings file %s: %s", settings_path, e)
+        sys.exit(1)
+    if not isinstance(settings, dict):
+        logger.error("Settings file %s must contain a JSON object.", settings_path)
+        sys.exit(1)
+
+    settings = apply_secret_overrides(settings)
+    settings = apply_cli_overrides(settings, args)
+    try:
+        validate_settings(settings)
+    except (KeyError, ValueError) as e:
+        logger.error("Invalid settings in %s: %s", settings_path, e.args[0])
+        sys.exit(1)
+    return settings
 
 
 SECRET_FILE_ENV_SUFFIX = "_FILE"
@@ -248,7 +331,7 @@ def fetch_openbao_secrets(env=None):
     token_file = env.get("OPENBAO_TOKEN_FILE")
     if not token and token_file:
         try:
-            token = Path(token_file).read_text().strip()
+            token = Path(token_file).read_text(encoding="utf-8").strip()
         except OSError as e:
             logger.warning("Could not read OpenBAO token file %s: %s", token_file, e)
             return {}
@@ -293,7 +376,7 @@ def apply_file_secret_overrides(settings, env=None):
         if not file_path:
             continue
         try:
-            settings[key] = Path(file_path).read_text().strip()
+            settings[key] = Path(file_path).read_text(encoding="utf-8").strip()
         except OSError as e:
             logger.warning(
                 "Could not read secret file %s for %s: %s", file_path, key, e
@@ -673,18 +756,28 @@ def handle_rate_limit_recovery(state, settings):
         )
 
 
-def build_connection_refused_entry(domain_str, next_attempt):
-    """Build a summary entry for a subdomain skipped because of refused logins."""
-    subdomain, domain = split_domain(domain_str)
+def make_result(domain, subdomain, record_type, destination, error=False):
+    """Build one entry of the update summary. Errors are flagged explicitly so
+    the failure tracking does not depend on how the summary is rendered."""
     return {
         "domain": domain,
         "subdomain": subdomain,
-        "record_type": "A/AAAA",
-        "destination": (
-            f"{RED_COLOR}CONNECTION REFUSED - retry after "
-            f"{format_timestamp(next_attempt)}{RESET_COLOR}"
-        ),
+        "record_type": record_type,
+        "destination": destination,
+        "error": error,
     }
+
+
+def build_connection_refused_entry(domain_str, next_attempt):
+    """Build a summary entry for a subdomain skipped because of refused logins."""
+    subdomain, domain = split_domain(domain_str)
+    return make_result(
+        domain,
+        subdomain,
+        "A/AAAA",
+        f"CONNECTION REFUSED - retry after {format_timestamp(next_attempt)}",
+        error=True,
+    )
 
 
 def check_endpoint_reachable(url, timeout=5):
@@ -694,6 +787,41 @@ def check_endpoint_reachable(url, timeout=5):
         return True
     except requests.exceptions.RequestException:
         return False
+
+
+def parse_ip_response(response):
+    """Extract the address from an IP provider response: a JSON object with an
+    "ip" key (ipify) or the plain address as text (icanhazip)."""
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if isinstance(data, dict) and "ip" in data:
+        return str(data["ip"]).strip()
+    return str(response.text).strip()
+
+
+def fetch_public_ip(urls, ip_version):
+    """Return the host's public IPv4 (ip_version=4) or IPv6 (ip_version=6)
+    address from the first provider that answers with a valid address of that
+    family, or None if no provider does."""
+    for url in urls:
+        try:
+            response = requests.get(url=url, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            address = ipaddress.ip_address(parse_ip_response(response))
+        except (requests.exceptions.RequestException, ValueError) as e:
+            logger.warning(
+                "Could not determine the public IPv%d address via %s: %s", ip_version, url, e
+            )
+            continue
+        if address.version != ip_version:
+            logger.warning(
+                "%s returned %s, which is not an IPv%d address.", url, address, ip_version
+            )
+            continue
+        return str(address)
+    return None
 
 
 def nginx_trusted_proxies_configuration(nextcloud_path, trusted_proxies_pos, ipv6):
@@ -711,12 +839,13 @@ def nginx_trusted_proxies_configuration(nextcloud_path, trusted_proxies_pos, ipv
         ],
         check=True,
     )
-    subprocess.run(["systemctl", "restart", "nginx"], check=True)
+    # A reload applies the new configuration without dropping open connections.
+    subprocess.run(["systemctl", "reload", "nginx"], check=True)
     logger.info("Trusted proxy at position %s set to %s", trusted_proxies_pos, ipv6)
-    logger.info("nginx restarted")
+    logger.info("nginx reloaded")
 
 
-def format_update_summary(updated_records):
+def format_update_summary(updated_records, use_color=False):
     if not updated_records:
         return "No DNS records were processed."
 
@@ -728,60 +857,125 @@ def format_update_summary(updated_records):
     for domain, records in records_by_domain.items():
         lines.append(domain)
         for record in records:
-            if "\033" in record["destination"]:
-                lines.append(
-                    f"  - {record['subdomain']} [{record['record_type']}] -> {record['destination']}"
+            destination = record["destination"]
+            if use_color and record.get("error"):
+                destination = f"{RED_COLOR}{destination}{RESET_COLOR}"
+            lines.append(
+                "  - {subdomain:<12} {record_type:<5} -> {destination}".format(
+                    subdomain=record["subdomain"],
+                    record_type=record["record_type"],
+                    destination=destination,
                 )
-            else:
-                lines.append(
-                    "  - {subdomain:<12} {record_type:<5} -> {destination}".format(**record)
-                )
+            )
     return "\n".join(lines)
 
 
+def parse_domain_entry(domain_str):
+    """Split a NETCUP_DOMAIN entry into (hostname, zone).
+
+    Without an explicit zone, the first label is the hostname and the rest is
+    the zone; an entry of only two labels is the zone apex ("@"):
+      "sub.example.com"   -> ("sub", "example.com")
+      "www.example.co.uk" -> ("www", "example.co.uk")
+      "example.com"       -> ("@", "example.com")
+    An explicit zone is given as "hostname@zone", which is required for
+    hostnames with more than one label and for the apex of zones with more
+    than two labels:
+      "a.b@example.com"   -> ("a.b", "example.com")
+      "@example.co.uk"    -> ("@", "example.co.uk")
+
+    Raises ValueError for entries that do not contain a valid zone.
+    """
+    entry = domain_str.strip().rstrip(".")
+    if ZONE_SEPARATOR in entry:
+        hostname, zone = entry.split(ZONE_SEPARATOR, 1)
+        hostname = hostname.strip().rstrip(".") or APEX_HOSTNAME
+        zone = zone.strip().strip(".")
+    else:
+        labels = entry.split(".")
+        if not all(labels):
+            raise ValueError(f"Invalid domain format: {domain_str!r}")
+        if len(labels) == 2:
+            hostname, zone = APEX_HOSTNAME, entry
+        else:
+            hostname, zone = labels[0], ".".join(labels[1:])
+    zone_labels = zone.split(".")
+    host_labels = [] if hostname == APEX_HOSTNAME else hostname.split(".")
+    if len(zone_labels) < 2 or not all(zone_labels + host_labels):
+        raise ValueError(f"Invalid domain format: {domain_str!r}")
+    return hostname, zone
+
+
 def split_domain(domain_str):
-    """Split a configured domain entry into (subdomain, domain), mirroring the
-    logic used by process_subdomain. Falls back to (domain_str, domain_str)
-    for entries without a subdomain part."""
-    split = domain_str.split(".")
-    if len(split) < 2:
+    """Split a configured domain entry into (subdomain, domain) like
+    parse_domain_entry. Falls back to (domain_str, domain_str) for invalid
+    entries so they can still be listed in the summary."""
+    try:
+        return parse_domain_entry(domain_str)
+    except ValueError:
         return domain_str, domain_str
-    return split[0], ".".join(split[1:])
+
+
+def group_domains_by_zone(domains):
+    """Group configured entries by DNS zone so each zone needs only one netcup
+    API session. Returns ({zone: [(entry, hostname), ...]}, [invalid entries])."""
+    zones = defaultdict(list)
+    invalid = []
+    for entry in domains:
+        try:
+            hostname, zone = parse_domain_entry(entry)
+        except ValueError:
+            invalid.append(entry)
+            continue
+        zones[zone].append((entry, hostname))
+    return dict(zones), invalid
 
 
 def build_exhausted_domain_entry(domain_str, max_retries=MAX_SUBDOMAIN_RETRIES):
     """Build a summary entry warning the admin that a subdomain has kept
     failing to update after exhausting its retry budget."""
     subdomain, domain = split_domain(domain_str)
-    return {
-        "domain": domain,
-        "subdomain": subdomain,
-        "record_type": "A/AAAA",
-        "destination": (
-            f"{RED_COLOR}CONFIG CHECK NEEDED - still failing after "
-            f"{max_retries} attempts{RESET_COLOR}"
-        ),
-    }
+    return make_result(
+        domain,
+        subdomain,
+        "A/AAAA",
+        f"CONFIG CHECK NEEDED - still failing after {max_retries} attempts",
+        error=True,
+    )
 
 
-def process_subdomain(domain_str, settings, IPv4, IPv6):
-    """Processes a single subdomain. Safe to run in parallel threads."""
-    RED = "\033[91m"
-    RESET = "\033[0m"
+def get_record_ips(settings, IPv4, IPv6):
+    """Return {record type: address} for the record types IP_MODE updates."""
+    ip_mode = get_ip_mode(settings)
+    record_ips = {}
+    if ip_mode in ("both", "ipv4"):
+        record_ips["A"] = IPv4
+    if ip_mode in ("both", "ipv6"):
+        record_ips["AAAA"] = IPv6
+    return record_ips
 
+
+def process_zone(zone, entries, settings, IPv4, IPv6):
+    """Updates the A/AAAA records of every configured entry of one DNS zone
+    within a single netcup API session: one login, one infoDnsRecords call,
+    one updateDnsRecords call for all records that actually changed, and one
+    logout. Safe to run in parallel threads.
+
+    `entries` is a list of (configured entry, hostname) tuples. Returns a dict
+    mapping each configured entry to its summary records. Raises
+    NetcupLoginRateLimitError if netcup refuses the login because of too many
+    logins.
+    """
     API_PASSWORD = settings["API_PASSWORD"]
     API_KEY = settings["API_KEY"]
     CUSTOMER_ID = settings["CUSTOMER_ID"]
-    ip_mode = get_ip_mode(settings)
+    record_ips = get_record_ips(settings, IPv4, IPv6)
 
-    results = []
-    split = domain_str.split(".")
-    if len(split) < 2:
-        logger.error("Invalid domain format: %s", domain_str)
-        return [{"domain": domain_str, "subdomain": domain_str, "record_type": "A/AAAA",
-                 "destination": f"{RED}INVALID FORMAT{RESET}"}], 2
-
-    SUBDOMAIN, DOMAIN = split[0], ".".join(split[1:])
+    def fail_all(destination):
+        return {
+            entry: [make_result(zone, hostname, "A/AAAA", destination, error=True)]
+            for entry, hostname in entries
+        }
 
     loginRequest = {
         "action": "login",
@@ -793,26 +987,24 @@ def process_subdomain(domain_str, settings, IPv4, IPv6):
     }
 
     try:
-        loginHttpResponse = requests.post(url=NETCUP_API, json=loginRequest)
+        loginHttpResponse = requests.post(url=NETCUP_API, json=loginRequest, timeout=REQUEST_TIMEOUT)
         if getattr(loginHttpResponse, "status_code", None) == 429:
-            raise NetcupLoginRateLimitError(f"HTTP 429 Too Many Requests during login for {domain_str}")
+            raise NetcupLoginRateLimitError(f"HTTP 429 Too Many Requests during login for {zone}")
         loginResponse = loginHttpResponse.json()
     except requests.RequestException as e:
         if is_connection_refused(e):
-            raise NetcupLoginRateLimitError(f"Connection refused during login for {domain_str}: {e}") from e
-        logger.error("HTTP Error during login for %s: %s", domain_str, e)
-        return [{"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A/AAAA",
-                 "destination": f"{RED}LOGIN FAILED{RESET}"}], 2
+            raise NetcupLoginRateLimitError(f"Connection refused during login for {zone}: {e}") from e
+        logger.error("HTTP Error during login for %s: %s", zone, e)
+        return fail_all("LOGIN FAILED")
 
     if is_login_rate_limited(loginResponse):
         raise NetcupLoginRateLimitError(
-            f"Login refused for {domain_str}: {loginResponse.get('longmessage') or loginResponse.get('shortmessage')}"
+            f"Login refused for {zone}: {loginResponse.get('longmessage') or loginResponse.get('shortmessage')}"
         )
 
     if loginResponse.get("status") != "success":
-        logger.error("Could not login at netcup API server for %s", domain_str)
-        return [{"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A/AAAA",
-                 "destination": f"{RED}LOGIN REFUSED{RESET}"}], 2
+        logger.error("Could not login at netcup API server for %s", zone)
+        return fail_all("LOGIN REFUSED")
 
     apiSessionId = loginResponse["responsedata"]["apisessionid"]
 
@@ -820,112 +1012,92 @@ def process_subdomain(domain_str, settings, IPv4, IPv6):
         infoDnsRecordsRequest = {
             "action": "infoDnsRecords",
             "param": {
-                "domainname": DOMAIN,
+                "domainname": zone,
                 "customernumber": CUSTOMER_ID,
                 "apikey": API_KEY,
                 "apisessionid": apiSessionId,
             },
         }
 
-        infoDnsRecordsResponse = requests.post(url=NETCUP_API, json=infoDnsRecordsRequest).json()
+        infoDnsRecordsResponse = requests.post(
+            url=NETCUP_API, json=infoDnsRecordsRequest, timeout=REQUEST_TIMEOUT
+        ).json()
         if infoDnsRecordsResponse.get("status") != "success":
-            logger.error("Could not retrieve DNS records for %s", DOMAIN)
-            return [{"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A/AAAA",
-                     "destination": f"{RED}FETCH RECORDS FAILED{RESET}"}], 2
+            logger.error("Could not retrieve DNS records for %s", zone)
+            return fail_all("FETCH RECORDS FAILED")
 
         dnsRecords = infoDnsRecordsResponse["responsedata"]["dnsrecords"]
 
-        a_updated = False
-        aaaa_updated = False
+        results = {entry: [] for entry, _ in entries}
+        # Summary entries of records that need an update, with the record to send.
+        changes = []
+        for entry, hostname in entries:
+            for record_type, ip in record_ips.items():
+                if ip is None:
+                    results[entry].append(
+                        make_result(zone, hostname, record_type, "SKIPPED - no public address")
+                    )
+                    continue
+                matching = [
+                    item for item in dnsRecords
+                    if item["hostname"].lower() == hostname.lower() and item["type"] == record_type
+                ]
+                if not matching:
+                    results[entry].append(
+                        make_result(zone, hostname, record_type, "RECORD NOT FOUND", error=True)
+                    )
+                    continue
+                for item in matching:
+                    if item.get("destination") == ip:
+                        results[entry].append(
+                            make_result(zone, hostname, record_type, f"{ip} (unchanged)")
+                        )
+                        continue
+                    result = make_result(zone, hostname, record_type, ip)
+                    results[entry].append(result)
+                    changes.append(
+                        (result, {
+                            "id": item["id"],
+                            "hostname": item["hostname"],
+                            "type": record_type,
+                            "destination": ip,
+                        })
+                    )
 
-        for item in dnsRecords:
-            if item["hostname"] != SUBDOMAIN:
-                continue
+        if changes:
+            updateDnsRecordsRequest = {
+                "action": "updateDnsRecords",
+                "param": {
+                    "domainname": zone,
+                    "customernumber": CUSTOMER_ID,
+                    "apikey": API_KEY,
+                    "apisessionid": apiSessionId,
+                    "dnsrecordset": {"dnsrecords": [record for _, record in changes]},
+                },
+            }
+            failure = None
+            try:
+                updateDnsRecordsResponse = requests.post(
+                    url=NETCUP_API, json=updateDnsRecordsRequest, timeout=REQUEST_TIMEOUT
+                ).json()
+                if updateDnsRecordsResponse.get("status") != "success":
+                    logger.error("Could not update the DNS records of %s", zone)
+                    failure = "UPDATE FAILED"
+            except requests.RequestException as e:
+                logger.error("Error updating the DNS records of %s: %s", zone, e)
+                failure = "HTTP ERROR"
+            if failure:
+                for result, _ in changes:
+                    result["destination"] = failure
+                    result["error"] = True
+        else:
+            logger.info("All DNS records of %s are already up to date.", zone)
 
-            if item["type"] == "A" and ip_mode in ("both", "ipv4") and IPv4 is not None:
-                updateDnsRecordsRequest = {
-                    "action": "updateDnsRecords",
-                    "param": {
-                        "domainname": DOMAIN,
-                        "customernumber": CUSTOMER_ID,
-                        "apikey": API_KEY,
-                        "apisessionid": apiSessionId,
-                        "dnsrecordset": {
-                            "dnsrecords": [
-                                {
-                                    "id": item["id"],
-                                    "hostname": SUBDOMAIN,
-                                    "type": item["type"],
-                                    "destination": IPv4,
-                                }
-                            ]
-                        },
-                    },
-                }
-                try:
-                    updateDnsRecordsResponse = requests.post(url=NETCUP_API, json=updateDnsRecordsRequest).json()
-                    if updateDnsRecordsResponse.get("status") != "success":
-                        logger.error("Could not update A record for %s.%s", SUBDOMAIN, DOMAIN)
-                        results.append({"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A",
-                                        "destination": f"{RED}UPDATE FAILED{RESET}"})
-                    else:
-                        results.append(
-                            {"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A", "destination": IPv4})
-                except requests.RequestException as e:
-                    logger.error("Error updating A record for %s.%s: %s", SUBDOMAIN, DOMAIN, e)
-                    results.append({"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A",
-                                    "destination": f"{RED}HTTP ERROR{RESET}"})
-                a_updated = True
+        return results
 
-            if item["type"] == "AAAA" and ip_mode in ("both", "ipv6") and IPv6 is not None:
-                updateDnsRecordsRequest = {
-                    "action": "updateDnsRecords",
-                    "param": {
-                        "domainname": DOMAIN,
-                        "customernumber": CUSTOMER_ID,
-                        "apikey": API_KEY,
-                        "apisessionid": apiSessionId,
-                        "dnsrecordset": {
-                            "dnsrecords": [
-                                {
-                                    "id": item["id"],
-                                    "hostname": SUBDOMAIN,
-                                    "type": item["type"],
-                                    "destination": IPv6,
-                                }
-                            ]
-                        },
-                    },
-                }
-                try:
-                    updateDnsRecordsResponse = requests.post(url=NETCUP_API, json=updateDnsRecordsRequest).json()
-                    if updateDnsRecordsResponse.get("status") != "success":
-                        logger.error("Could not update AAAA record for %s.%s", SUBDOMAIN, DOMAIN)
-                        results.append({"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "AAAA",
-                                        "destination": f"{RED}UPDATE FAILED{RESET}"})
-                    else:
-                        results.append(
-                            {"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "AAAA", "destination": IPv6})
-                except requests.RequestException as e:
-                    logger.error("Error updating AAAA record for %s.%s: %s", SUBDOMAIN, DOMAIN, e)
-                    results.append({"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "AAAA",
-                                    "destination": f"{RED}HTTP ERROR{RESET}"})
-                aaaa_updated = True
-
-        # Fallback falls Einträge nicht existieren
-        if not a_updated and ip_mode in ("both", "ipv4"):
-            results.append({"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A",
-                            "destination": f"{RED}RECORD NOT FOUND{RESET}"})
-        if not aaaa_updated and ip_mode in ("both", "ipv6"):
-            results.append({"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "AAAA",
-                            "destination": f"{RED}RECORD NOT FOUND{RESET}"})
-
-        return results, 2
-
-    except (KeyError, TypeError, requests.RequestException) as ex:
-        logger.error("Unexpected error processing %s: %s", domain_str, ex)
-        return [{"domain": DOMAIN, "subdomain": SUBDOMAIN, "record_type": "A/AAAA",
-                 "destination": f"{RED}UNEXPECTED ERROR{RESET}"}], 2
+    except (KeyError, TypeError, AttributeError, requests.RequestException) as ex:
+        logger.error("Unexpected error processing %s: %s", zone, ex)
+        return fail_all("UNEXPECTED ERROR")
     finally:
         logoutRequest = {
             "action": "logout",
@@ -936,29 +1108,46 @@ def process_subdomain(domain_str, settings, IPv4, IPv6):
             },
         }
         try:
-            requests.post(url=NETCUP_API, json=logoutRequest)
+            requests.post(url=NETCUP_API, json=logoutRequest, timeout=REQUEST_TIMEOUT)
         except requests.RequestException as exc:
             logger.debug("Failed to log out from netcup API: %s", exc)
 
 
+def update_trusted_proxy(settings, IPv6, cache_dir=cache_dir):
+    """Write IPv6 to the Nextcloud trusted_proxies configuration and reload
+    nginx. Returns True on success; failures are logged and return False so
+    the step is retried on the next run."""
+    try:
+        nginx_trusted_proxies_configuration(
+            settings["NEXTCLOUD_PATH"], settings["TRUSTED_PROXIES_POS"], IPv6
+        )
+    except (subprocess.CalledProcessError, OSError) as e:
+        logger.error(
+            "Could not update the Nextcloud trusted proxies / reload nginx: %s. "
+            "Retrying on the next run.",
+            e,
+        )
+        return False
+    write_trusted_proxy_ip(IPv6, cache_dir=cache_dir)
+    return True
+
+
 def main(argv=None):
+    """Run one update. Returns the process exit code: 0 if everything worked
+    (or nothing had to be done), 1 if a DNS record or the trusted-proxies
+    update failed. Invalid settings exit with status 1."""
     args = parse_cli_args(argv if argv is not None else [])
     active_settings_file, active_cache_dir = resolve_runtime_paths(args)
 
     if args.show_paths:
         print(f"Settings file: {active_settings_file}")
         print(f"Cache directory: {active_cache_dir}")
-        return
+        return 0
 
     create_settings_file_if_not_exists(active_settings_file, default_settings)
+    settings = load_settings(active_settings_file, args)
     cached_ipv4, cached_ipv6 = read_cached_ips(cache_dir=active_cache_dir)
     failed_domains = read_failed_domains(cache_dir=active_cache_dir)
-
-    with open(active_settings_file) as fp:
-        settings = json.load(fp)
-        settings = apply_secret_overrides(settings)
-        settings = apply_cli_overrides(settings, args)
-        validate_settings(settings)
 
     rate_limit_state = read_rate_limit_state(cache_dir=active_cache_dir)
     if rate_limit_state and time.time() < rate_limit_state["next_attempt"]:
@@ -976,17 +1165,42 @@ def main(argv=None):
             )
             sys.exit(0)
 
-    IPv4 = requests.get(url=IPV4_API).json()["ip"]
-    logger.info("Current public IPv4 address: %s", IPv4)
+    ip_mode = get_ip_mode(settings)
+    update_ipv4 = ip_mode in ("both", "ipv4")
+    update_ipv6 = ip_mode in ("both", "ipv6")
+    nextcloud_enabled = not settings.get("DISABLE_NEXTCLOUD_NGINX", False)
 
-    try:
-        IPv6 = requests.get(url=IPV6_API).json()["ip"]
+    IPv4 = fetch_public_ip(IPV4_APIS, 4) if update_ipv4 else None
+    if IPv4:
+        logger.info("Current public IPv4 address: %s", IPv4)
+    # The trusted proxy is an IPv6 address, so it is needed in every IP_MODE
+    # while the Nextcloud integration is enabled.
+    IPv6 = fetch_public_ip(IPV6_APIS, 6) if update_ipv6 or nextcloud_enabled else None
+    if IPv6:
         logger.info("Current public IPv6 address: %s", IPv6)
-    except requests.exceptions.RequestException as e:
-        IPv6 = None
-        logger.warning("No IPv6 address found. IPv6 cache will not be written: %s", e)
+    elif update_ipv6 or nextcloud_enabled:
+        logger.warning("No public IPv6 address found; AAAA records and trusted proxies are skipped.")
+    if update_ipv4 and IPv4 is None:
+        logger.warning("No public IPv4 address found; A records are skipped.")
 
-    ip_changed = not (IPv4 == cached_ipv4 and IPv6 == cached_ipv6)
+    if not ((update_ipv4 and IPv4) or (update_ipv6 and IPv6)):
+        logger.error("Could not determine any public IP address for IP_MODE '%s'.", ip_mode)
+        return 1
+
+    # An address that could not be determined is not treated as a change; its
+    # records are left untouched.
+    ip_changed = (update_ipv4 and IPv4 is not None and IPv4 != cached_ipv4) or (
+        update_ipv6 and IPv6 is not None and IPv6 != cached_ipv6
+    )
+    # Settings files from before 1.5.0 have no trusted-proxy cache yet; back
+    # then the trusted proxy was updated along with the cached IPv6 address.
+    applied_trusted_proxy = read_trusted_proxy_ip(cache_dir=active_cache_dir) if nextcloud_enabled else None
+    if applied_trusted_proxy is None:
+        applied_trusted_proxy = cached_ipv6
+    trusted_proxy_pending = (
+        nextcloud_enabled and IPv6 is not None and (IPv6 != applied_trusted_proxy or args.force)
+    )
+
     if args.force and not ip_changed:
         logger.info("--force given: updating DNS records despite unchanged cached IP addresses.")
     if rate_limit_state and not ip_changed and not args.force:
@@ -1004,57 +1218,22 @@ def main(argv=None):
         domain for domain, count in failed_domains.items() if count >= MAX_SUBDOMAIN_RETRIES
     )
 
-    if not ip_changed and not pending_retry_domains:
+    if not ip_changed and not pending_retry_domains and not trusted_proxy_pending:
         logger.info("IP addresses have not changed. No update necessary.")
         if exhausted_domains:
             logger.warning(
                 "%d subdomain(s) are still failing to update. Summary:\n%s",
                 len(exhausted_domains),
                 format_update_summary(
-                    [build_exhausted_domain_entry(domain) for domain in exhausted_domains]
+                    [build_exhausted_domain_entry(domain) for domain in exhausted_domains],
+                    use_color=colors_enabled(),
                 ),
             )
         sys.exit(0)
 
-    if ip_changed:
-        write_cached_ips(IPv4, IPv6, cache_dir=active_cache_dir)
-    else:
-        logger.info(
-            "IP addresses have not changed, but %d previously failed subdomain(s) "
-            "will be retried: %s",
-            len(pending_retry_domains),
-            ", ".join(sorted(pending_retry_domains)),
-        )
-
-    try:
-        with open(active_settings_file) as fp:
-            settings = json.load(fp)
-            settings = apply_secret_overrides(settings)
-            settings = apply_cli_overrides(settings, args)
-            try:
-                validate_settings(settings)
-                NETCUP_DOMAIN = settings["NETCUP_DOMAIN"]
-                DISABLE_NEXTCLOUD_NGINX = settings.get("DISABLE_NEXTCLOUD_NGINX", False)
-
-                if not DISABLE_NEXTCLOUD_NGINX:
-                    NEXTCLOUD_PATH = settings["NEXTCLOUD_PATH"]
-                    TRUSTED_PROXIES_POS = settings["TRUSTED_PROXIES_POS"]
-            except KeyError as e:
-                logger.error("Key %s is missing in .settings.json file.", e)
-                sys.exit(1)
-    except FileNotFoundError:
-        logger.error("%s file not found.", active_settings_file)
-        sys.exit(1)
-    except json.JSONDecodeError:
-        logger.error(".settings.json is not a valid JSON document.")
-        sys.exit(1)
-
-    if DISABLE_NEXTCLOUD_NGINX:
-        logger.info("Nextcloud and Nginx configuration tasks are disabled via settings.")
-    else:
-        nginx_trusted_proxies_configuration(NEXTCLOUD_PATH, TRUSTED_PROXIES_POS, IPv6)
-
-    configured_domains = [domain.strip() for domain in NETCUP_DOMAIN.split(",")]
+    configured_domains = [
+        domain.strip() for domain in settings["NETCUP_DOMAIN"].split(",") if domain.strip()
+    ]
 
     if ip_changed:
         # A real IP change always requires updating every configured domain,
@@ -1069,74 +1248,84 @@ def main(argv=None):
         domains_list = [
             domain for domain in configured_domains if domain in pending_retry_domains
         ]
-
-    logger.info(
-        "Updating DNS records for %d domain(s): %s",
-        len(domains_list),
-        ", ".join(domains_list),
-    )
-
-    total_records = len(domains_list) * 2
-    progress_bar = tqdm(
-        total=total_records,
-        desc="Updating DNS records",
-        unit="record",
-        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} records",
-    )
+        if domains_list:
+            logger.info(
+                "IP addresses have not changed, but %d previously failed subdomain(s) "
+                "will be retried: %s",
+                len(domains_list),
+                ", ".join(domains_list),
+            )
 
     updated_records = []
     domain_had_error = {}
     rate_limit_error = None
-    parallel_workers = get_parallel_processes(settings)
 
-    if parallel_workers > 1:
-        logger.info("Running parallel updating using ThreadPoolExecutor with %d workers.", parallel_workers)
-        with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
-            # Reiche alle Tasks an den ThreadPool ein
-            future_to_domain = {
-                executor.submit(process_subdomain, domain, settings, IPv4, IPv6): domain
-                for domain in domains_list
-            }
-            # Sobald Threads fertig sind, hole die Ergebnisse ab
-            for future in as_completed(future_to_domain):
-                domain = future_to_domain[future]
-                if future.cancelled():
-                    continue
+    if domains_list:
+        logger.info(
+            "Updating DNS records for %d domain(s): %s",
+            len(domains_list),
+            ", ".join(domains_list),
+        )
+        zones, invalid_domains = group_domains_by_zone(domains_list)
+        for domain in invalid_domains:
+            logger.error("Invalid domain format: %s", domain)
+            updated_records.append(
+                make_result(domain, domain, "A/AAAA", "INVALID FORMAT", error=True)
+            )
+            domain_had_error[domain] = True
+
+        progress_bar = tqdm(
+            total=len(domains_list) * 2,
+            desc="Updating DNS records",
+            unit="record",
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} records",
+            disable=None,
+        )
+
+        def collect(zone_entries, results):
+            for entry, _ in zone_entries:
+                entry_results = results.get(entry, [])
+                updated_records.extend(entry_results)
+                domain_had_error[entry] = any(r.get("error") for r in entry_results)
+            progress_bar.update(2 * len(zone_entries))
+
+        parallel_workers = get_parallel_processes(settings)
+        if parallel_workers > 1:
+            logger.info("Running parallel updating using ThreadPoolExecutor with %d workers.", parallel_workers)
+            with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+                future_to_zone = {
+                    executor.submit(process_zone, zone, entries, settings, IPv4, IPv6): zone
+                    for zone, entries in zones.items()
+                }
+                for future in as_completed(future_to_zone):
+                    zone = future_to_zone[future]
+                    if future.cancelled():
+                        continue
+                    try:
+                        collect(zones[zone], future.result())
+                    except NetcupLoginRateLimitError as exc:
+                        # Further logins would be refused as well; skip the zones not started yet.
+                        rate_limit_error = exc
+                        for pending in future_to_zone:
+                            pending.cancel()
+                    except (KeyError, TypeError, requests.RequestException) as exc:
+                        logger.error("%r generated an exception: %s", zone, exc)
+                        collect(zones[zone], {
+                            entry: [make_result(zone, hostname, "A/AAAA", "THREAD CRASHED", error=True)]
+                            for entry, hostname in zones[zone]
+                        })
+        else:
+            logger.info("Running sequentially (PARALLEL_PROCESSES <= 1).")
+            for zone, entries in zones.items():
                 try:
-                    res, count = future.result()
-                    updated_records.extend(res)
-                    domain_had_error[domain] = any(RED_COLOR in r["destination"] for r in res)
+                    results = process_zone(zone, entries, settings, IPv4, IPv6)
                 except NetcupLoginRateLimitError as exc:
-                    # Further logins would be refused as well; skip the domains not started yet.
+                    # Further logins would be refused as well; skip the remaining zones.
                     rate_limit_error = exc
-                    for pending in future_to_domain:
-                        pending.cancel()
-                    continue
-                except (KeyError, TypeError, requests.RequestException) as exc:
-                    logger.error("%r generated an exception: %s", domain, exc)
-                    # Falls der ganze Thread crasht, fügen wir einen Fehlereintrag hinzu
-                    updated_records.append({
-                        "domain": domain,
-                        "subdomain": "Error",
-                        "record_type": "A/AAAA",
-                        "destination": f"{RED_COLOR}THREAD CRASHED{RESET_COLOR}"
-                    })
-                    domain_had_error[domain] = True
-                progress_bar.update(2)
-    else:
-        logger.info("Running sequentially (PARALLEL_PROCESSES <= 1).")
-        for domain in domains_list:
-            try:
-                res, count = process_subdomain(domain, settings, IPv4, IPv6)
-            except NetcupLoginRateLimitError as exc:
-                # Further logins would be refused as well; skip the remaining domains.
-                rate_limit_error = exc
-                break
-            updated_records.extend(res)
-            domain_had_error[domain] = any(RED_COLOR in r["destination"] for r in res)
-            progress_bar.update(count)
+                    break
+                collect(entries, results)
 
-    progress_bar.close()
+        progress_bar.close()
 
     if rate_limit_error is not None:
         # Refused logins say nothing about the domain configuration, so the
@@ -1149,7 +1338,7 @@ def main(argv=None):
             for domain in domains_list
             if domain not in domain_had_error
         )
-    elif rate_limit_state:
+    elif rate_limit_state and domains_list:
         handle_rate_limit_recovery(rate_limit_state, settings)
         write_rate_limit_state({}, cache_dir=active_cache_dir)
 
@@ -1170,6 +1359,20 @@ def main(argv=None):
     }
     write_failed_domains(failed_domains, cache_dir=active_cache_dir)
 
+    # The IP cache is written only after the DNS records were processed, so a
+    # crash before or during the update does not hide the IP change from the
+    # next run. Failed domains are retried through the failure-retry cache.
+    if ip_changed:
+        write_cached_ips(IPv4, IPv6, cache_dir=active_cache_dir)
+
+    # The trusted proxy is updated after the DNS records, so a failing OCC
+    # call or nginx reload cannot prevent the DNS update.
+    trusted_proxy_failed = False
+    if not nextcloud_enabled:
+        logger.info("Nextcloud and Nginx configuration tasks are disabled via settings.")
+    elif trusted_proxy_pending:
+        trusted_proxy_failed = not update_trusted_proxy(settings, IPv6, cache_dir=active_cache_dir)
+
     exhausted_domains = sorted(
         domain for domain, count in failed_domains.items() if count >= MAX_SUBDOMAIN_RETRIES
     )
@@ -1180,9 +1383,13 @@ def main(argv=None):
 
     logger.info(
         "DNS update process finished. Summary:\n%s",
-        format_update_summary(updated_records),
+        format_update_summary(updated_records, use_color=colors_enabled()),
     )
+
+    if trusted_proxy_failed or any(record.get("error") for record in updated_records):
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    sys.exit(main(sys.argv[1:]))

@@ -13,4 +13,4 @@ def __getattr__(name):
 
 def cli():
     """Run the updater with command-line arguments from the installed command."""
-    main(sys.argv[1:])
+    sys.exit(main(sys.argv[1:]))

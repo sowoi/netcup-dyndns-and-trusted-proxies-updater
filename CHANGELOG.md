@@ -8,6 +8,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 When a pull request is merged into `main`, the section matching the version in
 `pyproject.toml` is used as the notes of the GitHub release.
 
+## [1.5.0] - 2026-10-30
+
+### Added
+- Support for Python 3.15; CI now tests on Python 3.13, 3.14 and 3.15.
+- Zone apex: an entry with two labels such as `example.com` updates the `@` records.
+- Explicit `host@zone` entries for multi-label host names and the apex of zones with
+  more than two labels, e.g. `a.b@example.com` or `@example.co.uk`. Entries such as
+  `sub.example.com` and `www.example.co.uk` are split as before.
+- Fallback IP provider (icanhazip) if ipify does not answer; every answer is validated
+  as an IPv4/IPv6 address.
+- Exit code 1 when a DNS record or the trusted-proxies update failed, no public IP
+  address could be determined, or the settings are invalid.
+- `trusted_proxy.txt` in the cache directory records the IPv6 address last written to
+  the Nextcloud trusted proxies.
+
+### Changed
+- One netcup API session per DNS zone instead of one per subdomain, and A and AAAA
+  records are sent in a single update request. This reduces the number of logins and
+  the risk of hitting the netcup login limit.
+- Records that already point at the current address are no longer sent to netcup.
+- DNS records are updated before the Nextcloud trusted proxies; the IP cache is written
+  after the DNS update.
+- The trusted proxies are updated only when the IPv6 address changed since it was last
+  applied (or with `--force`), no longer on every retry run.
+- nginx is reloaded (`systemctl reload nginx`) instead of restarted.
+- `IP_MODE` also controls which addresses are looked up: `ipv6` mode no longer queries
+  (or depends on) the public IPv4 address.
+- No ANSI color codes and no progress bar when the output is not a terminal or
+  `NO_COLOR` is set.
+- The settings file is read once per run (and OpenBAO queried once).
+- All files are read and written as UTF-8 explicitly.
+- Docker image based on Python 3.15 (Debian trixie) and uv 0.13.
+- Updated dependencies and tooling: setuptools >= 84.2.1 (build), pytest 9.2.0, ruff 0.17.3, virtualenv 21.15.1,
+  platformdirs 4.14.0 and others; GitHub Actions `actions/checkout@v7` and
+  `astral-sh/setup-uv@v10`; pre-commit hooks uv 0.13.6 and ruff 0.17.3.
+
+### Fixed
+- DNS records were never updated after an IP change if the OCC call or the nginx
+  restart failed, because the new IPs were already cached and the run aborted.
+- Without a public IPv6 address, `None` was written to the Nextcloud trusted proxies.
+- HTTP requests to netcup and the IP providers had no timeout and could hang forever.
+- A failing IPv4 lookup crashed the run.
+- Missing or invalid settings (for example on the first run) ended with a traceback
+  instead of an error message.
+- `--version` and every run of the Docker image crashed because the image contained
+  neither `pyproject.toml` nor package metadata.
+
 ## [1.4.1] - 2026-10-26
 
 ### Changed

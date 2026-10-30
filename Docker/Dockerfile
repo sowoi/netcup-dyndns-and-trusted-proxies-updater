@@ -4,7 +4,7 @@
 # Stage 1: resolve & install production dependencies with uv.
 # uv itself never ends up in the final runtime image.
 ########################################################################
-FROM ghcr.io/astral-sh/uv:0.9-python3.13-bookworm-slim AS builder
+FROM ghcr.io/astral-sh/uv:0.13-python3.15-trixie-slim AS builder
 
 WORKDIR /app
 
@@ -17,8 +17,8 @@ ENV UV_COMPILE_BYTECODE=1 \
 COPY pyproject.toml uv.lock ./
 
 # Install only the runtime dependency set (no dev tools such as pytest/ruff),
-# and skip installing the project itself since it has no build backend and is
-# only ever executed in place as "python src/netcup-dyndns.py".
+# and skip installing the project itself: inside the image it is executed in
+# place as "python src/netcup-dyndns.py".
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY src ./src
@@ -26,7 +26,7 @@ COPY src ./src
 ########################################################################
 # Stage 2: minimal runtime image - no uv, no compilers, no dev tools.
 ########################################################################
-FROM python:3.13-slim-bookworm AS runtime
+FROM python:3.15-slim-trixie AS runtime
 
 WORKDIR /app
 
@@ -37,6 +37,8 @@ RUN groupadd --system app \
 # the builder stage.
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src ./src
+# The project is not installed into the venv, so --version reads pyproject.toml.
+COPY pyproject.toml ./pyproject.toml
 COPY Docker/docker-entrypoint.sh ./docker-entrypoint.sh
 
 RUN chmod +x ./docker-entrypoint.sh \
