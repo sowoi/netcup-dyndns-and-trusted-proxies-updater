@@ -93,6 +93,10 @@ MAX_SUBDOMAIN_RETRIES = 5
 failed_domains_cache_file = "failed_domains.json"
 rate_limit_cache_file = "rate_limit.json"
 trusted_proxy_cache_file = "trusted_proxy.txt"
+last_success_cache_file = "last_success.txt"
+# Default maximum age in seconds of the last successful run for --health-check
+# (three times the default Docker update interval of 300 seconds).
+DEFAULT_HEALTH_CHECK_MAX_AGE = 900
 # Separates hostname and zone in a NETCUP_DOMAIN entry with an explicit zone,
 # e.g. "www@example.co.uk" or "@example.co.uk" for the zone apex.
 ZONE_SEPARATOR = "@"
@@ -127,7 +131,23 @@ default_settings = {
     "NTFY_SERVER": DEFAULT_NTFY_SERVER,
     "NTFY_TOPIC": "",
     "NTFY_TOKEN": "",
+    "NTFY_NOTIFY_IP_CHANGE": False,
+    "NTFY_NOTIFY_FAILURES": False,
+    "CREATE_MISSING_RECORDS": False,
 }
+
+# Values accepted as true for boolean settings given as strings (secret
+# files, OpenBAO or hand-edited JSON).
+TRUE_STRINGS = {"1", "true", "yes", "on"}
+
+
+def get_bool_setting(settings, key, default=False):
+    """Return a boolean setting, accepting JSON booleans and strings such as
+    "true"/"false" (e.g. from a secret file)."""
+    value = settings.get(key, default)
+    if isinstance(value, str):
+        return value.strip().lower() in TRUE_STRINGS
+    return bool(value)
 
 
 class NetcupLoginRateLimitError(Exception):
@@ -256,6 +276,39 @@ def write_trusted_proxy_ip(ipv6, cache_dir=cache_dir):
     (cache_path / trusted_proxy_cache_file).write_text(ipv6, encoding="utf-8")
 
 
+# Function to read the time of the last successful run
+def read_last_success(cache_dir=cache_dir):
+    """Return the Unix timestamp of the last successful run, or None."""
+    try:
+        return float((Path(cache_dir) / last_success_cache_file).read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+# Function to record the time of a successful run
+def write_last_success(timestamp, cache_dir=cache_dir):
+    """Persist the time of a successful run for --health-check."""
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+    (cache_path / last_success_cache_file).write_text(str(timestamp), encoding="utf-8")
+
+
+def check_health(max_age, cache_dir=cache_dir, now=None):
+    """Return 0 if the last successful run finished at most max_age seconds
+    ago, 1 otherwise. Used as Docker HEALTHCHECK."""
+    now = time.time() if now is None else now
+    last_success = read_last_success(cache_dir=cache_dir)
+    if last_success is None:
+        print("unhealthy: no successful run recorded yet")
+        return 1
+    age = now - last_success
+    if age > max_age:
+        print(f"unhealthy: last successful run {age:.0f}s ago (limit {max_age}s)")
+        return 1
+    print(f"healthy: last successful run {age:.0f}s ago")
+    return 0
+
+
 # Validates values in settings.json
 def validate_settings(settings):
     required_keys = [
@@ -264,7 +317,7 @@ def validate_settings(settings):
         "CUSTOMER_ID",
         "NETCUP_DOMAIN",
     ]
-    if not settings.get("DISABLE_NEXTCLOUD_NGINX", False):
+    if not get_bool_setting(settings, "DISABLE_NEXTCLOUD_NGINX"):
         required_keys.extend(["NEXTCLOUD_PATH", "TRUSTED_PROXIES_POS"])
 
     for key in required_keys:
@@ -415,6 +468,9 @@ CLI_ARGUMENT_TO_SETTINGS_KEY = {
     "ntfy_server": "NTFY_SERVER",
     "ntfy_topic": "NTFY_TOPIC",
     "ntfy_token": "NTFY_TOKEN",
+    "ntfy_notify_ip_change": "NTFY_NOTIFY_IP_CHANGE",
+    "ntfy_notify_failures": "NTFY_NOTIFY_FAILURES",
+    "create_missing_records": "CREATE_MISSING_RECORDS",
 }
 
 
@@ -446,6 +502,40 @@ def build_arg_parser():
         "--version",
         action="version",
         version=f"{read_project_version()}\n{REPOSITORY_URL}",
+    )
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show debug output, e.g. every netcup API request and the found records.",
+    )
+    verbosity.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Show only warnings and errors. The summary is still shown if a record failed.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Show what would be updated without changing DNS records, the "
+            "Nextcloud configuration, the cache or sending notifications. "
+            "Logs in to netcup to read the current records."
+        ),
+    )
+    parser.add_argument(
+        "--health-check",
+        nargs="?",
+        const=DEFAULT_HEALTH_CHECK_MAX_AGE,
+        type=int,
+        metavar="MAX_AGE_SECONDS",
+        help=(
+            "Exit with 0 if the last successful run finished at most "
+            f"MAX_AGE_SECONDS ago (default: {DEFAULT_HEALTH_CHECK_MAX_AGE}), "
+            "1 otherwise, without updating anything. Used as Docker HEALTHCHECK."
+        ),
     )
     parser.add_argument(
         "--settings-file",
@@ -562,6 +652,30 @@ def build_arg_parser():
         dest="ntfy_token",
         default=None,
         help="ntfy access token for protected topics. Overrides NTFY_TOKEN.",
+    )
+    parser.add_argument(
+        "--ntfy-notify-ip-change",
+        dest="ntfy_notify_ip_change",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Send a ntfy notification when the public IP address changed. Overrides NTFY_NOTIFY_IP_CHANGE.",
+    )
+    parser.add_argument(
+        "--ntfy-notify-failures",
+        dest="ntfy_notify_failures",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Send a ntfy notification when a domain still fails after all retries. "
+            "Overrides NTFY_NOTIFY_FAILURES."
+        ),
+    )
+    parser.add_argument(
+        "--create-missing-records",
+        dest="create_missing_records",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Create missing A/AAAA records instead of reporting them. Overrides CREATE_MISSING_RECORDS.",
     )
     return parser
 
@@ -810,13 +924,15 @@ def fetch_public_ip(urls, ip_version):
             response = requests.get(url=url, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             address = ipaddress.ip_address(parse_ip_response(response))
+        # Single provider failures are expected (e.g. no IPv6 connectivity) and
+        # absorbed by the next provider; the caller logs the overall result.
         except (requests.exceptions.RequestException, ValueError) as e:
-            logger.warning(
+            logger.debug(
                 "Could not determine the public IPv%d address via %s: %s", ip_version, url, e
             )
             continue
         if address.version != ip_version:
-            logger.warning(
+            logger.debug(
                 "%s returned %s, which is not an IPv%d address.", url, address, ip_version
             )
             continue
@@ -955,21 +1071,24 @@ def get_record_ips(settings, IPv4, IPv6):
     return record_ips
 
 
-def process_zone(zone, entries, settings, IPv4, IPv6):
+def process_zone(zone, entries, settings, IPv4, IPv6, dry_run=False):
     """Updates the A/AAAA records of every configured entry of one DNS zone
     within a single netcup API session: one login, one infoDnsRecords call,
-    one updateDnsRecords call for all records that actually changed, and one
-    logout. Safe to run in parallel threads.
+    one updateDnsRecords call for all records that actually changed (or are
+    created, with CREATE_MISSING_RECORDS), and one logout. Safe to run in
+    parallel threads.
 
     `entries` is a list of (configured entry, hostname) tuples. Returns a dict
     mapping each configured entry to its summary records. Raises
     NetcupLoginRateLimitError if netcup refuses the login because of too many
-    logins.
+    logins. With dry_run, the records are read but updateDnsRecords is not
+    called.
     """
     API_PASSWORD = settings["API_PASSWORD"]
     API_KEY = settings["API_KEY"]
     CUSTOMER_ID = settings["CUSTOMER_ID"]
     record_ips = get_record_ips(settings, IPv4, IPv6)
+    create_missing = get_bool_setting(settings, "CREATE_MISSING_RECORDS")
 
     def fail_all(destination):
         return {
@@ -986,6 +1105,7 @@ def process_zone(zone, entries, settings, IPv4, IPv6):
         },
     }
 
+    logger.debug("Logging in at the netcup API for zone %s.", zone)
     try:
         loginHttpResponse = requests.post(url=NETCUP_API, json=loginRequest, timeout=REQUEST_TIMEOUT)
         if getattr(loginHttpResponse, "status_code", None) == 429:
@@ -1027,6 +1147,14 @@ def process_zone(zone, entries, settings, IPv4, IPv6):
             return fail_all("FETCH RECORDS FAILED")
 
         dnsRecords = infoDnsRecordsResponse["responsedata"]["dnsrecords"]
+        logger.debug(
+            "DNS records of %s: %s",
+            zone,
+            ", ".join(
+                f"{item.get('hostname')} {item.get('type')} {item.get('destination')}"
+                for item in dnsRecords
+            ) or "none",
+        )
 
         results = {entry: [] for entry, _ in entries}
         # Summary entries of records that need an update, with the record to send.
@@ -1043,8 +1171,16 @@ def process_zone(zone, entries, settings, IPv4, IPv6):
                     if item["hostname"].lower() == hostname.lower() and item["type"] == record_type
                 ]
                 if not matching:
-                    results[entry].append(
-                        make_result(zone, hostname, record_type, "RECORD NOT FOUND", error=True)
+                    if not create_missing:
+                        results[entry].append(
+                            make_result(zone, hostname, record_type, "RECORD NOT FOUND", error=True)
+                        )
+                        continue
+                    # A record without id is created by updateDnsRecords.
+                    result = make_result(zone, hostname, record_type, f"{ip} (created)")
+                    results[entry].append(result)
+                    changes.append(
+                        (result, {"hostname": hostname, "type": record_type, "destination": ip})
                     )
                     continue
                 for item in matching:
@@ -1064,7 +1200,15 @@ def process_zone(zone, entries, settings, IPv4, IPv6):
                         })
                     )
 
-        if changes:
+        if changes and dry_run:
+            for result, record in changes:
+                action = "would update" if "id" in record else "would create"
+                result["destination"] = f"{record['destination']} ({action})"
+            logger.info("Dry run: %d DNS record(s) of %s would be changed.", len(changes), zone)
+        elif changes:
+            logger.debug(
+                "Sending %d changed DNS record(s) of %s to netcup.", len(changes), zone
+            )
             updateDnsRecordsRequest = {
                 "action": "updateDnsRecords",
                 "param": {
@@ -1132,19 +1276,71 @@ def update_trusted_proxy(settings, IPv6, cache_dir=cache_dir):
     return True
 
 
+def get_log_level(args):
+    """Return the log level selected with -v/--verbose or -q/--quiet."""
+    if args.verbose:
+        return logging.DEBUG
+    if args.quiet:
+        return logging.WARNING
+    return logging.INFO
+
+
+def notify_ip_change(settings, cached_ipv4, cached_ipv6, IPv4, IPv6, failed):
+    """Send a ntfy notification about a changed public IP address."""
+    changes = [
+        f"{label}: {old or 'none'} -> {new}"
+        for label, old, new in (("IPv4", cached_ipv4, IPv4), ("IPv6", cached_ipv6, IPv6))
+        if new is not None and new != old
+    ]
+    outcome = (
+        "Some DNS records could not be updated; see the log."
+        if failed
+        else "The DNS records were updated."
+    )
+    send_ntfy_notification(
+        settings,
+        "netcup DynDNS: IP address changed",
+        "\n".join([*changes, outcome]),
+        priority="default",
+        tags="globe_with_meridians",
+    )
+
+
+def notify_exhausted_domains(settings, domains):
+    """Send a ntfy notification about domains that exhausted their retries."""
+    send_ntfy_notification(
+        settings,
+        "netcup DynDNS: DNS update failing",
+        (
+            f"Still failing after {MAX_SUBDOMAIN_RETRIES} attempts: {', '.join(domains)}. "
+            "They are retried after the next IP change or with --force. "
+            "Please check the configuration and the DNS records."
+        ),
+    )
+
+
 def main(argv=None):
     """Run one update. Returns the process exit code: 0 if everything worked
     (or nothing had to be done), 1 if a DNS record or the trusted-proxies
     update failed. Invalid settings exit with status 1."""
     args = parse_cli_args(argv if argv is not None else [])
+    logger.setLevel(get_log_level(args))
     active_settings_file, active_cache_dir = resolve_runtime_paths(args)
+    dry_run = args.dry_run
 
     if args.show_paths:
         print(f"Settings file: {active_settings_file}")
         print(f"Cache directory: {active_cache_dir}")
         return 0
 
-    create_settings_file_if_not_exists(active_settings_file, default_settings)
+    if args.health_check is not None:
+        return check_health(args.health_check, cache_dir=active_cache_dir)
+
+    logger.debug("Settings file: %s, cache directory: %s", active_settings_file, active_cache_dir)
+    if dry_run:
+        logger.info("Dry run: no DNS records, Nextcloud configuration or cache files are changed.")
+    else:
+        create_settings_file_if_not_exists(active_settings_file, default_settings)
     settings = load_settings(active_settings_file, args)
     cached_ipv4, cached_ipv6 = read_cached_ips(cache_dir=active_cache_dir)
     failed_domains = read_failed_domains(cache_dir=active_cache_dir)
@@ -1168,7 +1364,7 @@ def main(argv=None):
     ip_mode = get_ip_mode(settings)
     update_ipv4 = ip_mode in ("both", "ipv4")
     update_ipv6 = ip_mode in ("both", "ipv6")
-    nextcloud_enabled = not settings.get("DISABLE_NEXTCLOUD_NGINX", False)
+    nextcloud_enabled = not get_bool_setting(settings, "DISABLE_NEXTCLOUD_NGINX")
 
     IPv4 = fetch_public_ip(IPV4_APIS, 4) if update_ipv4 else None
     if IPv4:
@@ -1178,10 +1374,15 @@ def main(argv=None):
     IPv6 = fetch_public_ip(IPV6_APIS, 6) if update_ipv6 or nextcloud_enabled else None
     if IPv6:
         logger.info("Current public IPv6 address: %s", IPv6)
-    elif update_ipv6 or nextcloud_enabled:
+    elif nextcloud_enabled:
+        # The trusted proxy cannot be updated without an IPv6 address.
         logger.warning("No public IPv6 address found; AAAA records and trusted proxies are skipped.")
+    elif update_ipv6:
+        # Common on IPv4-only hosts and Docker networks; not worth a warning on
+        # every run. A missing address in a single-family IP_MODE fails below.
+        logger.info("No public IPv6 address found; AAAA records are skipped.")
     if update_ipv4 and IPv4 is None:
-        logger.warning("No public IPv4 address found; A records are skipped.")
+        logger.info("No public IPv4 address found; A records are skipped.")
 
     if not ((update_ipv4 and IPv4) or (update_ipv6 and IPv6)):
         logger.error("Could not determine any public IP address for IP_MODE '%s'.", ip_mode)
@@ -1208,6 +1409,7 @@ def main(argv=None):
             "Retrying all domains after %d refused login attempt(s).",
             rate_limit_state["failures"],
         )
+    real_ip_change = ip_changed
     # --force and a pending login backoff are treated like a real IP change so
     # every configured domain is updated.
     ip_changed = ip_changed or args.force or bool(rate_limit_state)
@@ -1229,6 +1431,8 @@ def main(argv=None):
                     use_color=colors_enabled(),
                 ),
             )
+        if not dry_run:
+            write_last_success(time.time(), cache_dir=active_cache_dir)
         sys.exit(0)
 
     configured_domains = [
@@ -1294,7 +1498,9 @@ def main(argv=None):
             logger.info("Running parallel updating using ThreadPoolExecutor with %d workers.", parallel_workers)
             with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
                 future_to_zone = {
-                    executor.submit(process_zone, zone, entries, settings, IPv4, IPv6): zone
+                    executor.submit(
+                        process_zone, zone, entries, settings, IPv4, IPv6, dry_run=dry_run
+                    ): zone
                     for zone, entries in zones.items()
                 }
                 for future in as_completed(future_to_zone):
@@ -1318,7 +1524,7 @@ def main(argv=None):
             logger.info("Running sequentially (PARALLEL_PROCESSES <= 1).")
             for zone, entries in zones.items():
                 try:
-                    results = process_zone(zone, entries, settings, IPv4, IPv6)
+                    results = process_zone(zone, entries, settings, IPv4, IPv6, dry_run=dry_run)
                 except NetcupLoginRateLimitError as exc:
                     # Further logins would be refused as well; skip the remaining zones.
                     rate_limit_error = exc
@@ -1331,17 +1537,24 @@ def main(argv=None):
         # Refused logins say nothing about the domain configuration, so the
         # skipped domains are not counted against their retry budget. They are
         # all updated on the next attempt after the backoff.
-        rate_limit_state = handle_rate_limit_hit(rate_limit_state, settings, rate_limit_error)
-        write_rate_limit_state(rate_limit_state, cache_dir=active_cache_dir)
+        if dry_run:
+            logger.error("Connection Refused: %s", rate_limit_error)
+            rate_limit_state, _ = register_rate_limit_hit(
+                rate_limit_state, get_rate_limit_backoff_minutes(settings), time.time()
+            )
+        else:
+            rate_limit_state = handle_rate_limit_hit(rate_limit_state, settings, rate_limit_error)
+            write_rate_limit_state(rate_limit_state, cache_dir=active_cache_dir)
         updated_records.extend(
             build_connection_refused_entry(domain, rate_limit_state["next_attempt"])
             for domain in domains_list
             if domain not in domain_had_error
         )
-    elif rate_limit_state and domains_list:
+    elif rate_limit_state and domains_list and not dry_run:
         handle_rate_limit_recovery(rate_limit_state, settings)
         write_rate_limit_state({}, cache_dir=active_cache_dir)
 
+    previous_failed_domains = dict(failed_domains)
     # Update the failure-retry cache: domains that succeeded are cleared,
     # domains that failed again have their counter incremented (capped at
     # MAX_SUBDOMAIN_RETRIES so they don't keep being force-retried forever).
@@ -1357,12 +1570,13 @@ def main(argv=None):
     failed_domains = {
         domain: count for domain, count in failed_domains.items() if domain in configured_domains
     }
-    write_failed_domains(failed_domains, cache_dir=active_cache_dir)
+    if not dry_run:
+        write_failed_domains(failed_domains, cache_dir=active_cache_dir)
 
     # The IP cache is written only after the DNS records were processed, so a
     # crash before or during the update does not hide the IP change from the
     # next run. Failed domains are retried through the failure-retry cache.
-    if ip_changed:
+    if ip_changed and not dry_run:
         write_cached_ips(IPv4, IPv6, cache_dir=active_cache_dir)
 
     # The trusted proxy is updated after the DNS records, so a failing OCC
@@ -1370,6 +1584,12 @@ def main(argv=None):
     trusted_proxy_failed = False
     if not nextcloud_enabled:
         logger.info("Nextcloud and Nginx configuration tasks are disabled via settings.")
+    elif trusted_proxy_pending and dry_run:
+        logger.info(
+            "Dry run: would set trusted proxy %s to %s and reload nginx.",
+            settings["TRUSTED_PROXIES_POS"],
+            IPv6,
+        )
     elif trusted_proxy_pending:
         trusted_proxy_failed = not update_trusted_proxy(settings, IPv6, cache_dir=active_cache_dir)
 
@@ -1381,13 +1601,30 @@ def main(argv=None):
             build_exhausted_domain_entry(domain) for domain in exhausted_domains
         )
 
-    logger.info(
-        "DNS update process finished. Summary:\n%s",
+    failed = trusted_proxy_failed or any(record.get("error") for record in updated_records)
+
+    if not dry_run:
+        if real_ip_change and get_bool_setting(settings, "NTFY_NOTIFY_IP_CHANGE"):
+            notify_ip_change(settings, cached_ipv4, cached_ipv6, IPv4, IPv6, failed)
+        newly_exhausted = [
+            domain for domain in exhausted_domains
+            if previous_failed_domains.get(domain, 0) < MAX_SUBDOMAIN_RETRIES
+        ]
+        if newly_exhausted and get_bool_setting(settings, "NTFY_NOTIFY_FAILURES"):
+            notify_exhausted_domains(settings, newly_exhausted)
+
+    # Failures are logged as a warning so the summary is also shown with --quiet.
+    logger.log(
+        logging.WARNING if failed else logging.INFO,
+        "%s finished. Summary:\n%s",
+        "Dry run" if dry_run else "DNS update process",
         format_update_summary(updated_records, use_color=colors_enabled()),
     )
 
-    if trusted_proxy_failed or any(record.get("error") for record in updated_records):
+    if failed:
         return 1
+    if not dry_run:
+        write_last_success(time.time(), cache_dir=active_cache_dir)
     return 0
 
 

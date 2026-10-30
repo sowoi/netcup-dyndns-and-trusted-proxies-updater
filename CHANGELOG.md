@@ -8,6 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 When a pull request is merged into `main`, the section matching the version in
 `pyproject.toml` is used as the notes of the GitHub release.
 
+## [1.6.0] - 2026-10-30
+
+### Added
+- `--dry-run`: reads the current DNS records from netcup and shows which records would
+  be updated or created, without sending updates, running OCC/nginx, writing the
+  settings or cache files, or sending notifications.
+- `-v`/`--verbose` for debug output (paths, netcup API sessions, records per zone) and
+  `-q`/`--quiet` to show only warnings and errors; the summary of a failed run is still
+  shown.
+- `NTFY_NOTIFY_IP_CHANGE` (`--ntfy-notify-ip-change`): ntfy notification with the old
+  and new addresses after the public IP address changed.
+- `NTFY_NOTIFY_FAILURES` (`--ntfy-notify-failures`): one ntfy notification when a
+  domain still fails after all retries.
+- `CREATE_MISSING_RECORDS` (`--create-missing-records`): missing A/AAAA records are
+  created in the same update request instead of being reported as `RECORD NOT FOUND`.
+- Docker `HEALTHCHECK` and `--health-check [MAX_AGE_SECONDS]`: healthy while the last
+  successful run (recorded in `last_success.txt` in the cache directory) is recent
+  enough; runs skipped by the login backoff do not count.
+
+### Changed
+- The summary of a failed run is logged as a warning instead of info.
+- A missing public IPv6 (or IPv4) address in `IP_MODE` `both` is logged as info instead
+  of three warnings per run, so IPv4-only hosts and Docker networks stay quiet with
+  `-q`. It remains a warning while the Nextcloud integration needs the IPv6 address.
+  Failures of single IP providers are logged only with `-v`.
+- The Docker entrypoint runs `--version`, `--show-paths` and `--health-check` once
+  instead of looping.
+
+### Fixed
+- Boolean settings given as strings, e.g. `DISABLE_NEXTCLOUD_NGINX_FILE` containing
+  `false`, were treated as true.
+
 ## [1.5.0] - 2026-10-30
 
 ### Added
