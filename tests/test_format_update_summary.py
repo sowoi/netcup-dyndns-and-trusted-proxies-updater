@@ -60,3 +60,22 @@ def test_format_update_summary_groups_multiple_subdomains_by_domain():
     assert lines[3].strip().startswith("- www")
     assert lines[4] == "example.net"
     assert lines[5].strip().startswith("- app")
+
+
+def test_format_update_summary_colors_errors_only_when_enabled():
+    records = [
+        {
+            "domain": "example.com",
+            "subdomain": "sub",
+            "record_type": "A",
+            "destination": "LOGIN FAILED",
+            "error": True,
+        }
+    ]
+
+    plain = format_update_summary(records)
+    colored = format_update_summary(records, use_color=True)
+
+    assert "\033" not in plain
+    assert plain == "example.com\n  - sub          A     -> LOGIN FAILED"
+    assert "\033[91mLOGIN FAILED\033[0m" in colored

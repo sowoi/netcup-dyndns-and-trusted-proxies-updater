@@ -180,7 +180,7 @@ def test_main_uses_configured_settings_and_cache_paths(tmp_path, mocker):
     )
     mocker.patch("requests.get", side_effect=_mock_ip_get_responses(mocker))
     mocker.patch("src.updateDynDns.nginx_trusted_proxies_configuration")
-    mocker.patch("src.updateDynDns.process_subdomain", return_value=([], 2))
+    mocker.patch("src.updateDynDns.process_zone", return_value={})
 
     main(
         [
@@ -291,15 +291,15 @@ def test_main_cli_args_override_settings_json_domain(mocker):
     mocker.patch("requests.get", side_effect=_mock_ip_get_responses(mocker))
     mocker.patch("src.updateDynDns.nginx_trusted_proxies_configuration")
 
-    process_subdomain_mock = mocker.patch(
-        "src.updateDynDns.process_subdomain", return_value=([], 2)
+    process_zone_mock = mocker.patch(
+        "src.updateDynDns.process_zone", return_value={}
     )
 
     main(["--netcup-domain", "cli-domain.example.org"])
 
-    process_subdomain_mock.assert_called_once()
-    called_domain = process_subdomain_mock.call_args.args[0]
-    assert called_domain == "cli-domain.example.org"
+    process_zone_mock.assert_called_once()
+    assert process_zone_mock.call_args.args[0] == "example.org"
+    assert process_zone_mock.call_args.args[1] == [("cli-domain.example.org", "cli-domain")]
 
 
 def test_main_cli_disable_nextcloud_nginx_overrides_settings(mocker):
@@ -315,8 +315,18 @@ def test_main_cli_disable_nextcloud_nginx_overrides_settings(mocker):
     )
     mocker.patch("requests.get", side_effect=_mock_ip_get_responses(mocker))
     nginx_mock = mocker.patch("src.updateDynDns.nginx_trusted_proxies_configuration")
-    mocker.patch("src.updateDynDns.process_subdomain", return_value=([], 2))
+    mocker.patch("src.updateDynDns.process_zone", return_value={})
+    mocker.patch("src.updateDynDns.read_trusted_proxy_ip", return_value=None)
+    mocker.patch("src.updateDynDns.write_trusted_proxy_ip")
 
     main(["--no-disable-nextcloud-nginx"])
 
     nginx_mock.assert_called_once_with("/var/www/nextcloud", "0", "::1")
+
+
+def test_read_project_version_without_pyproject_or_metadata(tmp_path, mocker):
+    """Inside the Docker image the project is not installed; --version must not crash."""
+    from importlib.metadata import PackageNotFoundError
+
+    mocker.patch("src.updateDynDns.version", side_effect=PackageNotFoundError("x"))
+    assert read_project_version(tmp_path / "missing.toml") == "unknown"

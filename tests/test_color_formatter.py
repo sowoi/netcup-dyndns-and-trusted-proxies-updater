@@ -47,3 +47,10 @@ def test_tqdm_logging_handler_writes_via_tqdm(mocker):
     logger.error("boom")
 
     tqdm_write_mock.assert_called_once_with("boom")
+
+
+def test_error_messages_are_plain_without_color():
+    formatter = ColorFormatter(fmt="%(message)s", use_color=False)
+    record = logging.LogRecord("test", logging.ERROR, __file__, 1, "plain", (), None)
+
+    assert formatter.format(record) == "plain"

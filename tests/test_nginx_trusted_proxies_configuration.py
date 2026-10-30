@@ -25,6 +25,6 @@ def test_nginx_trusted_proxies_configuration():
             check=True,
         )
 
-        mock_run.assert_any_call(["systemctl", "restart", "nginx"], check=True)
+        mock_run.assert_any_call(["systemctl", "reload", "nginx"], check=True)
 
         assert mock_run.call_count == 2

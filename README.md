@@ -21,7 +21,7 @@ The script checks the current IPv4/IPv6 address of the host and updates the corr
 Additionally, it updates the Trusted Proxies configuration in Nextcloud via the OCC CLI.
 
 ## Prerequisites
-This script needs Python 3.13 or newer.
+This script needs Python 3.13 or newer and is tested on Python 3.13, 3.14 and 3.15.
 
 ## Installation
 
@@ -118,7 +118,7 @@ The first run will create a settings.json file and a temp folder in your project
 API_PASSWORD: Your Netcup API password.  
 API_KEY: Your Netcup API key.  
 CUSTOMER_ID: Your Netcup customer ID.  
-NETCUP_DOMAIN: The domain name(s) you want to update, separated by commas (e.g., example.com, example.net).  
+NETCUP_DOMAIN: The host name(s) you want to update, separated by commas (e.g., sub.example.com, example.net). See [Domain Entries](#domain-entries).  
 NEXTCLOUD_PATH: The file path to your Nextcloud instance (required unless DISABLE_NEXTCLOUD_NGINX is true).
 TRUSTED_PROXIES_POS: The position in the TrustedProxies configuration where the new IP address should be added (e.g., the first, second, etc.; required unless DISABLE_NEXTCLOUD_NGINX is true).
 PARALLEL_PROCESSES: Number of parallel threads for DNS updates (Default: 1 for sequential execution. Values > 1 enable the ThreadPoolExecutor).
@@ -203,7 +203,7 @@ netcup-dyndns --netcup-domain example.com,example.net
 Instead of installing `uv` and Python locally, you can run this project as a lightweight
 Docker container. The provided `Docker/Dockerfile` uses a multi-stage build: `uv` and dependency
 resolution happen only in a throw-away build stage, and the final runtime image is based
-on `python:3.13-slim` with just the resolved virtual environment and application code —
+on `python:3.15-slim` with just the resolved virtual environment and application code —
 no `uv`, compilers, or other build tools are present in the image you actually run.
 
 1. Create and fill in your `.settings.json` file (see [Configuration](#configuration) for
@@ -228,7 +228,7 @@ no `uv`, compilers, or other build tools are present in the image you actually r
    ```
 
 3. **Nextcloud/Nginx integration caveat:** `nginx_trusted_proxies_configuration` shells out
-   to `sudo`, `php occ`, and `systemctl restart nginx` on the host. These are not available
+   to `sudo`, `php occ`, and `systemctl reload nginx` on the host. These are not available
    inside the minimal container, so set `DISABLE_NEXTCLOUD_NGINX: true` in `.settings.json`
    when running via Docker unless you specifically bind-mount those host binaries into a
    privileged container (not recommended). Running purely as a DynDNS client works out of
@@ -330,7 +330,34 @@ Updating DNS records: 100%|██████████| 4/4 records
 ```
 
 Regular progress is logged to stdout with timestamps and log levels (INFO/WARNING).
-Errors are logged in red (ERROR) so failures stand out immediately.
+On a terminal, errors are logged in red (ERROR) so failures stand out immediately. When
+the output is not a terminal (cron mails, `docker logs`, systemd journal) or the
+[`NO_COLOR`](https://no-color.org) environment variable is set, no ANSI color codes are
+written and the progress bar is hidden.
+
+The public addresses are determined via ipify, with icanhazip as fallback. Every answer
+is validated as an IPv4 or IPv6 address before it is used. All HTTP requests time out
+after 10 seconds. Only the address types needed for `IP_MODE` are looked up; the IPv6
+address is also looked up while the Nextcloud integration is enabled, since the trusted
+proxy is an IPv6 address.
+
+Each run proceeds in this order:
+
+1. Update the DNS records. All entries of one DNS zone share a single netcup API
+   session (one login, one record lookup, one update request), which keeps the number
+   of logins low. Records that already point at the current address are not sent to
+   netcup and are listed as `(unchanged)` in the summary.
+2. Save the new IP addresses to the cache.
+3. Write the IPv6 address to the Nextcloud `trusted_proxies` configuration and reload
+   nginx, but only if the IPv6 address differs from the one last applied (or with
+   `--force`). If this step fails, the DNS update is kept and the step is retried on
+   the next run. Without a public IPv6 address, the step is skipped with a warning.
+
+**Exit codes:** The script exits with `0` when all records were updated (or nothing had
+to be done, including runs skipped because of the login backoff). It exits with `1`
+when the settings are missing or invalid, no public IP address could be determined, a
+DNS record could not be updated (including refused logins and domains that exhausted
+their retries), or the trusted-proxies update failed.
 
 When multiple domains or subdomains are configured, the script prints a summary at
 the end grouped by domain instead of a flat sequential list, e.g.:
@@ -347,11 +374,33 @@ example.net
 ## Configuration
 
 Upon the first execution, the script creates a settings.json file and a temp folder.
+As long as required values are empty, each run exits with status 1 and names the
+missing value.
 
 The API identifiers for Netcup (API key, password, and customer ID) must be configured in the settings.json file.
 In the NETCUP_DOMAIN field, list all desired domain names separated by commas (e.g., example.com, example.net).
 NEXTCLOUD_PATH should point to the directory where your Nextcloud instance is located.
 TRUSTED_PROXIES_POS specifies the position in the TrustedProxies configuration where the new IP address should be inserted.
+
+### Domain Entries
+
+Every entry in NETCUP_DOMAIN is split into a host name and a DNS zone (the domain in
+your netcup account). By default, the first label is the host name and the rest is the
+zone; an entry with only two labels updates the zone apex (`@`):
+
+| Entry               | Host name | Zone            |
+|---------------------|-----------|-----------------|
+| `sub.example.com`   | `sub`     | `example.com`   |
+| `www.example.co.uk` | `www`     | `example.co.uk` |
+| `example.com`       | `@`       | `example.com`   |
+
+For host names with more than one label, and for the apex of zones with more than two
+labels, write the entry as `host@zone` (or `@zone` for the apex):
+
+| Entry               | Host name | Zone            |
+|---------------------|-----------|-----------------|
+| `a.b@example.com`   | `a.b`     | `example.com`   |
+| `@example.co.uk`    | `@`       | `example.co.uk` |
 
 ## Contributing
 

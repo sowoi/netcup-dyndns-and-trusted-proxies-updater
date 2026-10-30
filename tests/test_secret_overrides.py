@@ -52,7 +52,7 @@ def test_fetch_openbao_secrets_fetches_and_filters_known_keys(mocker):
 
 def test_fetch_openbao_secrets_reads_token_from_file(mocker, tmp_path):
     token_file = tmp_path / "token"
-    token_file.write_text("s.filetoken\n")
+    token_file.write_text("s.filetoken\n", encoding="utf-8")
 
     response = mocker.MagicMock()
     response.json.return_value = {"data": {"data": {"API_KEY": "from-file-token"}}}
@@ -122,7 +122,7 @@ def test_fetch_openbao_secrets_uses_default_secret_path(mocker):
 
 def test_apply_file_secret_overrides_reads_secret_files(tmp_path):
     password_file = tmp_path / "password"
-    password_file.write_text("file-password\n")
+    password_file.write_text("file-password\n", encoding="utf-8")
 
     settings = dict.fromkeys(default_settings, "")
     result = apply_file_secret_overrides(
@@ -152,7 +152,7 @@ def test_apply_file_secret_overrides_skips_missing_file(mocker):
 
 def test_apply_secret_overrides_file_takes_precedence_over_openbao(mocker, tmp_path):
     password_file = tmp_path / "password"
-    password_file.write_text("file-password")
+    password_file.write_text("file-password", encoding="utf-8")
 
     response = mocker.MagicMock()
     response.json.return_value = {"data": {"data": {"API_PASSWORD": "openbao-password"}}}

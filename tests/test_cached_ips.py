@@ -43,8 +43,8 @@ def tests_write_cached_ips(delete_ip_cache, mocker):
     # Assertions
     assert ipv4_path.exists(), "ipv4 File was not created."
     assert ipv6_path.exists(), "ipv6 File was not created."
-    assert ipv4_path.read_text() == f"{TEST_IPV4}", "IPv4 is not correct."
-    assert ipv6_path.read_text() == f"{TEST_IPV6}", "IPv6 is not correct."
+    assert ipv4_path.read_text(encoding="utf-8") == f"{TEST_IPV4}", "IPv4 is not correct."
+    assert ipv6_path.read_text(encoding="utf-8") == f"{TEST_IPV6}", "IPv6 is not correct."
 
 
 def test_read_cached_ips(mocker):
@@ -79,8 +79,8 @@ def test_write_cached_ips_handles_missing_ipv6(delete_ip_cache):
     ipv4_path = temp_test_directory_path / "ipv4_cache.txt"
     ipv6_path = temp_test_directory_path / "ipv6_cache.txt"
 
-    assert ipv4_path.read_text() == "1.2.3.4"
-    assert ipv6_path.read_text() == ""
+    assert ipv4_path.read_text(encoding="utf-8") == "1.2.3.4"
+    assert ipv6_path.read_text(encoding="utf-8") == ""
 
 
 def test_read_cached_ips_returns_none_for_empty_ipv6_cache(delete_ip_cache):
